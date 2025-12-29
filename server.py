@@ -1,9 +1,9 @@
 # =================================================================
-# BusRam MCP Server (Stateless HTTP / JSON-RPC Version)
+# BusRam MCP Server (CSV Hybrid Version)
 # =================================================================
 import uvicorn
 import requests
-import urllib.parse
+import pandas as pd  # pandas 추가 (requirements.txt에 있어야 함)
 import os
 import json
 from starlette.applications import Starlette
@@ -12,123 +12,135 @@ from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
-# 1. 설정 및 키
+# 1. 설정 및 CSV 데이터 로드 (서버 시작 시 1회 실행)
 # -----------------------------------------------------------------
-# ⚠️ 주의: Render 환경변수에 DECODING_KEY가 없다면 아래 문자열이 사용됩니다.
-# (보안을 위해 실제 배포시엔 Render Environment Variables에 키를 넣는 것을 추천합니다)
+# ⚠️ 본인의 [Encoding] 인증키를 여기에 넣으세요 (URL에 직접 붙일 용도)
 DECODING_KEY = os.environ.get("DECODING_KEY", "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg==")
 
-# 2. 도구(Tool) 실제 함수 정의
+
+print("📂 [System] 정류장 데이터(CSV) 로딩 중...")
+CSV_PATH = "국토교통부_전국 버스정류장 위치정보_20251031.csv"
+
+try:
+    # 1. CSV 읽기 (인코딩 자동 감지 시도)
+    try:
+        df_stations = pd.read_csv(CSV_PATH, encoding='cp949')
+    except:
+        df_stations = pd.read_csv(CSV_PATH, encoding='utf-8')
+
+    # 2. 데이터 전처리 (검색 속도를 위해 문자열로 변환)
+    df_stations['정류장명'] = df_stations['정류장명'].astype(str)
+    df_stations['도시코드'] = df_stations['도시코드'].astype(str)
+    df_stations['정류장번호'] = df_stations['정류장번호'].astype(str) # 이게 API용 ID (nodeId)
+    
+    print(f"✅ [System] 데이터 로드 완료! 총 {len(df_stations)}개 정류장 대기 중.")
+
+except Exception as e:
+    print(f"❌ [Critical] CSV 파일 로드 실패: {e}")
+    print("👉 '국토교통부_전국 버스정류장 위치정보_20251031.csv' 파일이 같은 폴더에 있는지 확인하세요.")
+    df_stations = pd.DataFrame() # 빈 껍데기 생성 (서버 다운 방지)
+
+
+# 2. 도구(Tool) 함수 정의
 # -----------------------------------------------------------------
-# ❌ 수정됨: @mcp.tool 데코레이터 삭제함 (이제 필요 없음)
-def search_station(keyword: str, city_code: str = "11") -> str:
-    print(f"[Tool] 정류장 검색: {keyword}, 도시코드: {city_code}")
-    url = "https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnNoList"
+def get_bus_arrival(keyword: str) -> str:
+    """
+    정류장 이름(예: '강남역', '판교역')을 입력받아,
+    CSV에서 ID를 찾고 -> 실시간 도착 정보를 조회해줍니다.
+    """
+    print(f"[Tool] '{keyword}' 검색 및 도착정보 조회 시작")
     
-    # ✅ 수정됨: SERVICE_KEY -> DECODING_KEY로 변수명 통일
-    params = {
-        "serviceKey": DECODING_KEY, 
-        "cityCode": city_code, 
-        "nodeNm": keyword, 
-        "numOfRows": 5, 
-        "_type": "json"
-    }
-    
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        
-        # 디버깅: 실제로 호출된 URL 확인
-        print(f"[Debug] 요청 URL: {response.url}") 
-        
-        try: data = response.json()
-        except: return f"Error: {response.text}"
-        
-        if 'response' not in data: return f"API Error: {data}"
-        
-        if data['response']['body']['totalCount'] == 0: 
-            return f"검색 결과가 없습니다. (도시코드 '{city_code}'에서 '{keyword}'를 찾지 못함. 도시코드를 변경해보세요.)"
-        
-        items = data['response']['body']['items']['item']
-        if isinstance(items, dict): items = [items]
-        
-        result = f"🔍 '{keyword}' 검색 결과 (도시코드 {city_code}):\n"
-        for item in items:
-            result += f"- {item.get('nodeNm')} (ID: {item.get('nodeid')})\n"
-        return result
-    except Exception as e: return f"Error: {str(e)}"
+    if df_stations.empty:
+        return "❌ 서버 에러: 정류장 데이터 파일(CSV)이 로드되지 않았습니다."
 
+    # [Step 1] CSV에서 정류장 검색 (이름에 키워드가 포함된 것 찾기)
+    mask = df_stations['정류장명'].str.contains(keyword)
+    results = df_stations[mask]
+    
+    if results.empty:
+        return f"❌ '{keyword}' 검색 결과가 없습니다. 정류장 이름을 확인해주세요."
+    
+    # 결과가 너무 많으면 상위 3개만 조회 (속도 최적화)
+    targets = results.head(3)
+    final_output = f"🚏 '{keyword}' 관련 정류장 도착 정보:\n"
+    
+    # [Step 2] 찾은 정류장 ID로 API 호출
+    api_url = "https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
+    
+    for _, row in targets.iterrows():
+        station_name = row['정류장명']
+        station_id = row['정류장번호']  # CSV에서 꺼낸 ID (nodeId)
+        city_code = row['도시코드']     # CSV에서 꺼낸 도시코드
+        
+        final_output += f"\n📍 {station_name} (ID: {station_id})\n"
+        
+        # Requests가 키를 망가뜨리지 않게 URL에 직접 붙임
+        request_url = f"{api_url}?serviceKey={ENCODING_KEY}"
+        params = {
+            "cityCode": city_code,
+            "nodeId": station_id,
+            "numOfRows": 5,
+            "_type": "json"
+        }
+        
+        try:
+            response = requests.get(request_url, params=params, timeout=5)
+            
+            try: data = response.json()
+            except: 
+                final_output += "   - (데이터 조회 실패: API 응답 오류)\n"
+                continue
 
-def check_arrival(city_code: str, station_id: str) -> str:
-    """특정 정류장의 버스 도착 정보를 실시간으로 조회합니다."""
-    print(f"[Tool Exec] check_arrival: {station_id}")
-    url = "https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
-    
-    # ✅ 수정됨: DECODING_KEY 사용 확인
-    params = {"serviceKey": DECODING_KEY, "cityCode": city_code, "nodeId": station_id, "numOfRows": 10, "_type": "json"}
-    
-    try:
-        response = requests.get(url, params=params, timeout=10)
-        try: data = response.json()
-        except: return f"Error parsing JSON: {response.text}"
-        
-        if 'response' not in data: return f"API Error: {data}"
-        if data['response']['body']['totalCount'] == 0: return "도착 정보 없음"
-        
-        items = data['response']['body']['items']['item']
-        if isinstance(items, dict): items = [items]
-        
-        result = f"🚌 정류장(ID:{station_id}) 도착 정보:\n"
-        for item in items:
-            min_left = int(item.get('arrtime')) // 60
-            result += f"- [{item.get('routeno')}번] {min_left}분 후\n"
-        return result
-    except Exception as e: return f"Error: {str(e)}"
+            if data['response']['body']['totalCount'] == 0:
+                final_output += "   💤 현재 도착 예정인 버스가 없습니다.\n"
+                continue
+                
+            items = data['response']['body']['items']['item']
+            if isinstance(items, dict): items = [items]
+            
+            for bus in items:
+                route_no = bus.get('routeno') # 버스 번호
+                arr_time = bus.get('arrtime') # 남은 시간(초)
+                min_left = int(arr_time) // 60
+                msg = bus.get('arrmsg1', '')  # "곧 도착" 등 메시지
+                
+                final_output += f"   🚌 [{route_no}번] {min_left}분 후 도착 ({msg})\n"
+                
+        except Exception as e:
+            final_output += f"   - ⚠️ 에러 발생: {str(e)}\n"
+            
+    return final_output
+
 
 # 3. 도구 등록부 (카카오에게 보여줄 메뉴판)
 # -----------------------------------------------------------------
 TOOLS = [
     {
-        "name": "search_station",
-        "description": "정류장 이름을 검색해서 ID와 ARS 번호를 찾습니다. 사용자가 '강남역' 등을 물어볼 때 사용합니다.",
+        "name": "get_bus_arrival",
+        "description": "정류장 이름(예: 서울역, 강남역)을 검색하면, 해당 정류장에 곧 도착하는 버스 정보를 알려줍니다.",
         "inputSchema": {
             "type": "object",
             "properties": {
-                "keyword": {"type": "string", "description": "검색할 정류장 이름 (예: 강남역)"},
-                "city_code": {"type": "string", "description": "도시 코드 (서울: 11, 경기: 12)"}
+                "keyword": {"type": "string", "description": "검색할 정류장 이름 (예: 강남역)"}
             },
             "required": ["keyword"]
         },
-        "func": search_station
-    },
-    {
-        "name": "check_arrival",
-        "description": "특정 정류장의 버스 도착 정보를 실시간으로 조회합니다.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "city_code": {"type": "string", "description": "도시 코드 (서울: 11)"},
-                "station_id": {"type": "string", "description": "정류장 ID"}
-            },
-            "required": ["city_code", "station_id"]
-        },
-        "func": check_arrival
+        "func": get_bus_arrival
     }
 ]
 
-# 4. JSON-RPC 처리 로직
+# 4. JSON-RPC 처리 로직 (수정할 필요 없음)
 # -----------------------------------------------------------------
 async def handle_mcp_request(request):
     try:
         body = await request.json()
         method = body.get("method")
         msg_id = body.get("id")
-        
         print(f"[POST] Method: {method}")
 
         if method == "initialize":
             return JSONResponse({
-                "jsonrpc": "2.0",
-                "id": msg_id,
+                "jsonrpc": "2.0", "id": msg_id,
                 "result": {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {"tools": {}},
@@ -137,29 +149,22 @@ async def handle_mcp_request(request):
             })
 
         elif method == "tools/list":
-            # func 키를 제외하고 전송
             return JSONResponse({
-                "jsonrpc": "2.0",
-                "id": msg_id,
-                "result": {
-                    "tools": [{k: v for k, v in t.items() if k != 'func'} for t in TOOLS]
-                }
+                "jsonrpc": "2.0", "id": msg_id,
+                "result": {"tools": [{k: v for k, v in t.items() if k != 'func'} for t in TOOLS]}
             })
 
         elif method == "tools/call":
             params = body.get("params", {})
             tool_name = params.get("name")
             args = params.get("arguments", {})
-            
             tool = next((t for t in TOOLS if t["name"] == tool_name), None)
             
             if tool:
                 try:
-                    # 함수 실행
                     result_text = tool["func"](**args)
                     return JSONResponse({
-                        "jsonrpc": "2.0",
-                        "id": msg_id,
+                        "jsonrpc": "2.0", "id": msg_id,
                         "result": {
                             "content": [{"type": "text", "text": result_text}],
                             "isError": False
@@ -167,36 +172,20 @@ async def handle_mcp_request(request):
                     })
                 except Exception as e:
                     return JSONResponse({
-                        "jsonrpc": "2.0", 
-                        "id": msg_id, 
-                        "result": {
-                            "content": [{"type": "text", "text": f"Error: {str(e)}"}],
-                            "isError": True
-                        }
+                        "jsonrpc": "2.0", "id": msg_id, 
+                        "result": {"content": [{"type": "text", "text": f"Error: {str(e)}"}], "isError": True}
                     })
             else:
                 return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": "Method not found"}})
-
         else:
             return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {}})
-
     except Exception as e:
-        print(f"Error: {e}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 async def handle_root(request):
-    return JSONResponse({"status": "ok", "service": "BusRam MCP (Stateless)"})
+    return JSONResponse({"status": "ok", "service": "BusRam MCP (CSV Hybrid)"})
 
-# 5. 서버 실행
-# -----------------------------------------------------------------
-middleware = [
-    Middleware(
-        CORSMiddleware,
-        allow_origins=["*"],
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
-]
+middleware = [Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])]
 
 app = Starlette(
     debug=True,

@@ -1,62 +1,64 @@
 import requests
-import urllib.parse
 
-# ⚠️ 여기에 본인의 'Decoding' 키를 꼭 붙여넣으세요!
-DECODING_KEY = "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg=="
+# ⚠️ [중요] 여기에 'Encoding' 키를 넣으세요! (% 문자가 포함된 긴 키)
+ENCODING_KEY = "ezGwhdiNnVtd%2BHvkfiKgr%2FZ4r%2BgvfeUIRz%2FdVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI%2B%2FpJFoYr9Ce%2BTDg%3D%3D"
 
-def search_station_test(keyword: str):
+def search_station_final_test(keyword: str):
     print(f"🚀 검색 시작: {keyword}")
+
+    # 1. 기본 URL
+    base_url = "https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnNoList"
     
-    # 원본 코드와 동일한 로직
-    url = "https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnNoList"
+    # 2. [핵심 수정] 키를 params가 아니라 URL 뒤에 직접 붙입니다.
+    # 이렇게 하면 파이썬이 키를 멋대로 건드리지 않습니다.
+    url = f"{base_url}?serviceKey={ENCODING_KEY}"
+    
+    # 3. 나머지 파라미터 설정 (serviceKey 제외)
     params = {
-        "serviceKey": DECODING_KEY, 
-        "cityCode": "11",  # 서울
+        "cityCode": "11",   # 서울
         "nodeNm": keyword, 
         "numOfRows": 5, 
         "_type": "json"
     }
 
     try:
-        # 1. API 요청 보내기
+        # 4. 요청 보내기
         response = requests.get(url, params=params, timeout=10)
-        print(f"📡 응답 상태 코드: {response.status_code}")
+        
+        # 디버깅: 실제로 날아가는 주소를 눈으로 확인
+        print(f"🔗 실제 요청 URL: {response.url}")
+        print(f"📡 응답 코드: {response.status_code}")
 
-        # 2. JSON 변환 시도
-        try: 
+        # 5. 데이터 확인
+        try:
             data = response.json()
-        except: 
-            print("❌ JSON 변환 실패. 응답 내용 확인:")
+        except:
+            print("❌ JSON 변환 실패. 응답 텍스트:")
             print(response.text)
             return
 
-        # 3. 에러 체크
-        if 'response' not in data: 
-            print(f"❌ API Error: {data}")
+        # 6. 결과 분석
+        if 'response' not in data:
+            print(f"❌ API 구조 에러: {data}")
             return
-        
-        # 4. 결과 개수 확인
-        total_count = data['response']['body']['totalCount']
-        if total_count == 0: 
-            print("❌ 검색 결과가 없습니다.")
-            return
-
-        # 5. 아이템 파싱
-        items = data['response']['body']['items']['item']
-        if isinstance(items, dict): 
-            items = [items]
-        
-        # 6. 결과 출력
-        print(f"✅ 검색 성공! ({len(items)}개 발견)")
-        for item in items:
-            print(f" - 정류장명: {item.get('nodeNm')}") 
-            print(f"   ID: {item.get('nodeid')}")
-            print(f"   ARS번호: {item.get('nodeno')}")
-            print("-" * 20)
             
-    except Exception as e: 
-        print(f"❌ 에러 발생: {str(e)}")
+        total_count = data['response']['body']['totalCount']
+        
+        if total_count == 0:
+            print("❌ 여전히 결과가 0건입니다.")
+            print("👉 1. 활용신청한 API가 [국토교통부 버스정류소정보]가 맞는지 확인하세요.")
+            print("👉 2. 키 발급 후 1시간이 지났는지 확인하세요.")
+            return
 
-# 실제 테스트 실행
+        items = data['response']['body']['items']['item']
+        if isinstance(items, dict): items = [items]
+
+        print(f"✅ 성공! {len(items)}개의 정류장을 찾았습니다.")
+        for item in items:
+            print(f"- {item.get('nodeNm')} (ID: {item.get('nodeid')})")
+
+    except Exception as e:
+        print(f"❌ 에러 발생: {e}")
+
 if __name__ == "__main__":
-    search_station_test("서울역") # 원하는 정류장 이름으로 변경해서 테스트
+    search_station_final_test("판교")
