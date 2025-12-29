@@ -1,64 +1,62 @@
 import requests
+import json
+import os
 
-# ⚠️ [중요] 여기에 'Encoding' 키를 넣으세요! (% 문자가 포함된 긴 키)
+# ⚠️ 본인의 [Encoding] 키를 넣으세요
 ENCODING_KEY = "ezGwhdiNnVtd%2BHvkfiKgr%2FZ4r%2BgvfeUIRz%2FdVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI%2B%2FpJFoYr9Ce%2BTDg%3D%3D"
 
-def search_station_final_test(keyword: str):
-    print(f"🚀 검색 시작: {keyword}")
+def check_api_permissions():
+    print("🏥 [API 진단] 내 키로 서울/경기 데이터가 나오는지 확인합니다...\n")
 
-    # 1. 기본 URL
-    base_url = "https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnNoList"
-    
-    # 2. [핵심 수정] 키를 params가 아니라 URL 뒤에 직접 붙입니다.
-    # 이렇게 하면 파이썬이 키를 멋대로 건드리지 않습니다.
-    url = f"{base_url}?serviceKey={ENCODING_KEY}"
-    
-    # 3. 나머지 파라미터 설정 (serviceKey 제외)
-    params = {
-        "cityCode": "11",   # 서울
-        "nodeNm": keyword, 
-        "numOfRows": 5, 
-        "_type": "json"
+    # 1. 경기도 API 테스트 (판교역)
+    print("1️⃣ 경기도 API (판교역) 테스트 중...")
+    url_gg = "http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList"
+    params_gg = {
+        "serviceKey": ENCODING_KEY,
+        "stationId": "206000233"  # 판교역서편 ID (경기도 전용)
     }
-
     try:
-        # 4. 요청 보내기
-        response = requests.get(url, params=params, timeout=10)
-        
-        # 디버깅: 실제로 날아가는 주소를 눈으로 확인
-        print(f"🔗 실제 요청 URL: {response.url}")
-        print(f"📡 응답 코드: {response.status_code}")
-
-        # 5. 데이터 확인
-        try:
-            data = response.json()
-        except:
-            print("❌ JSON 변환 실패. 응답 텍스트:")
-            print(response.text)
-            return
-
-        # 6. 결과 분석
-        if 'response' not in data:
-            print(f"❌ API 구조 에러: {data}")
-            return
-            
-        total_count = data['response']['body']['totalCount']
-        
-        if total_count == 0:
-            print("❌ 여전히 결과가 0건입니다.")
-            print("👉 1. 활용신청한 API가 [국토교통부 버스정류소정보]가 맞는지 확인하세요.")
-            print("👉 2. 키 발급 후 1시간이 지났는지 확인하세요.")
-            return
-
-        items = data['response']['body']['items']['item']
-        if isinstance(items, dict): items = [items]
-
-        print(f"✅ 성공! {len(items)}개의 정류장을 찾았습니다.")
-        for item in items:
-            print(f"- {item.get('nodeNm')} (ID: {item.get('nodeid')})")
-
+        res = requests.get(url_gg, params=params_gg, timeout=5)
+        # 경기도는 보통 XML을 주지만, 에러면 HTML/JSON이 올 수도 있음
+        if "<busArrivalList>" in res.text:
+            print("   ✅ 성공! (경기도 API 권한 있음)")
+            print("   👉 'Ultimate(완전체)' 코드를 쓰시면 판교역 잘 나옵니다.")
+        elif "SERVICE_ACCESS_DENIED" in res.text or "SERVICE_KEY_IS_NOT_REGISTERED" in res.text:
+            print("   ❌ 실패 (인증 에러)")
+            print("   👉 공공데이터포털에서 [경기도_버스도착정보조회] 신청 필요")
+        else:
+            print(f"   ⚠️ 응답 확인 필요: {res.text[:100]}...")
     except Exception as e:
-        print(f"❌ 에러 발생: {e}")
+        print(f"   ❌ 에러 발생: {e}")
+    print("-" * 40)
+
+    # 2. 서울시 API 테스트 (강남역)
+    print("2️⃣ 서울시 API (강남역) 테스트 중...")
+    url_seoul = "http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid"
+    params_seoul = {
+        "serviceKey": ENCODING_KEY,
+        "arsId": "22009",  # 강남역 ARS 번호
+        "resultType": "json"
+    }
+    try:
+        res = requests.get(url_seoul, params=params_seoul, timeout=5)
+        try:
+            data = res.json()
+            if 'msgBody' in data:
+                print("   ✅ 성공! (서울시 API 권한 있음)")
+                print("   👉 'Ultimate(완전체)' 코드를 쓰시면 강남역 잘 나옵니다.")
+            else:
+                print("   ❌ 실패 (데이터 구조 다름)")
+        except:
+            # JSON 변환 실패면 보통 에러 메시지(XML)임
+            if "SERVICE_ACCESS_DENIED" in res.text:
+                print("   ❌ 실패 (인증 에러)")
+                print("   👉 공공데이터포털에서 [서울특별시_버스도착정보조회] 신청 필요")
+            else:
+                print(f"   ⚠️ 응답: {res.text[:100]}")
+    except Exception as e:
+        print(f"   ❌ 에러 발생: {e}")
+    print("-" * 40)
 
 if __name__ == "__main__":
-    search_station_final_test("판교")
+    check_api_permissions()

@@ -44,5 +44,6 @@ def test_remote_server(keyword):
         print(f"❌ 요청 실패: {e}")
 
 if __name__ == "__main__":
-    # 테스트할 정류장 이름
-    test_remote_server("하림각")
+    # 버스가 24시간 많은 곳으로 테스트 (방향 기능 확인용)
+    test_remote_server("판교역") 
+    
