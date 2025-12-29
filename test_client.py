@@ -9,7 +9,7 @@ def check_api_permissions():
     print("🏥 [API 진단] 내 키로 서울/경기 데이터가 나오는지 확인합니다...\n")
 
     # 1. 경기도 API 테스트 (판교역)
-    print("1️⃣ 경기도 API (판교역) 테스트 중...")
+    print(" 경기도 API (판교역) 테스트 중...")
     url_gg = "http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList"
     params_gg = {
         "serviceKey": ENCODING_KEY,
@@ -31,7 +31,7 @@ def check_api_permissions():
     print("-" * 40)
 
     # 2. 서울시 API 테스트 (강남역)
-    print("2️⃣ 서울시 API (강남역) 테스트 중...")
+    print("서울시 API (강남역) 테스트 중...")
     url_seoul = "http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid"
     params_seoul = {
         "serviceKey": ENCODING_KEY,
