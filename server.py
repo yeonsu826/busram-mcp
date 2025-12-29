@@ -19,7 +19,7 @@ DECODING_KEY = os.environ.get("DECODING_KEY", "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIR
 
 
 print("📂 [System] 정류장 데이터(CSV) 로딩 중...")
-CSV_PATH = "국토교통부_전국 버스정류장 위치정보_20251031.csv"
+CSV_PATH = "station_data.csv"
 
 try:
     # 1. CSV 읽기 (인코딩 자동 감지 시도)
