@@ -1,44 +1,62 @@
-import asyncio
-from mcp.client.sse import sse_client
-from mcp.client.session import ClientSession
+import requests
+import urllib.parse
 
-# 👇 여기에 님의 Render 주소를 넣으세요 (뒤에 /sse 꼭 붙이기!)
-SERVER_URL = "https://busram-mcp.onrender.com/mcp"
+# ⚠️ 여기에 본인의 'Decoding' 키를 꼭 붙여넣으세요!
+DECODING_KEY = "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg=="
 
-async def run_test():
-    print(f"🔌 서버에 접속 시도 중... ({SERVER_URL})")
+def search_station_test(keyword: str):
+    print(f"🚀 검색 시작: {keyword}")
     
+    # 원본 코드와 동일한 로직
+    url = "https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnNoList"
+    params = {
+        "serviceKey": DECODING_KEY, 
+        "cityCode": "11",  # 서울
+        "nodeNm": keyword, 
+        "numOfRows": 5, 
+        "_type": "json"
+    }
+
     try:
-        # 1. 서버와 연결 (AI가 접속하는 것과 똑같음)
-        async with sse_client(SERVER_URL) as streams:
-            async with ClientSession(streams[0], streams[1]) as session:
-                await session.initialize()
-                print("✅ 서버 연결 성공! (AI가 접속했습니다)")
+        # 1. API 요청 보내기
+        response = requests.get(url, params=params, timeout=10)
+        print(f"📡 응답 상태 코드: {response.status_code}")
 
-                # 2. 도구 목록 확인 (메뉴판 달라고 하기)
-                tools = await session.list_tools()
-                print(f"\n📋 발견된 도구(Tools): {[t.name for t in tools.tools]}")
+        # 2. JSON 변환 시도
+        try: 
+            data = response.json()
+        except: 
+            print("❌ JSON 변환 실패. 응답 내용 확인:")
+            print(response.text)
+            return
 
-                # 3. 'search_station' 도구 써보기 (종로1가 검색)
-                print("\n🤖 AI: '종로1가 정류장 찾아줘' (명령 보냄)")
-                result1 = await session.call_tool("search_station", arguments={"keyword": "종로1가"})
-                
-                print(f"📨 서버 응답:\n{result1.content[0].text}")
+        # 3. 에러 체크
+        if 'response' not in data: 
+            print(f"❌ API Error: {data}")
+            return
+        
+        # 4. 결과 개수 확인
+        total_count = data['response']['body']['totalCount']
+        if total_count == 0: 
+            print("❌ 검색 결과가 없습니다.")
+            return
 
-                # 4. 'check_arrival' 도구 써보기 (위에서 찾은 ID로 도착 정보 조회)
-                # (테스트를 위해 종로1가 ID 100000386 직접 입력)
-                print("\n🤖 AI: 'ID 100000386 버스 언제 와?' (명령 보냄)")
-                result2 = await session.call_tool("check_arrival", arguments={
-                    "city_code": "11",
-                    "station_id": "100000386"
-                })
-                
-                print(f"📨 서버 응답:\n{result2.content[0].text}")
-                
-    except Exception as e:
-        print(f"❌ 접속 실패: {e}")
-        print("팁: 주소 뒤에 /mcp 를 붙였는지, https가 맞는지 확인하세요.")
+        # 5. 아이템 파싱
+        items = data['response']['body']['items']['item']
+        if isinstance(items, dict): 
+            items = [items]
+        
+        # 6. 결과 출력
+        print(f"✅ 검색 성공! ({len(items)}개 발견)")
+        for item in items:
+            print(f" - 정류장명: {item.get('nodeNm')}") 
+            print(f"   ID: {item.get('nodeid')}")
+            print(f"   ARS번호: {item.get('nodeno')}")
+            print("-" * 20)
+            
+    except Exception as e: 
+        print(f"❌ 에러 발생: {str(e)}")
 
+# 실제 테스트 실행
 if __name__ == "__main__":
-    # 비동기 실행을 위한 설정
-    asyncio.run(run_test())
+    search_station_test("서울역") # 원하는 정류장 이름으로 변경해서 테스트

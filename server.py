@@ -19,29 +19,44 @@ DECODING_KEY = "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4
 
 # 2. 도구(Tool) 실제 함수 정의
 # -----------------------------------------------------------------
-def search_station(keyword: str) -> str:
-    """정류장 이름을 검색해서 ID와 ARS 번호를 찾습니다."""
-    print(f"[Tool Exec] search_station: {keyword}")
+@mcp.tool(description="정류장 이름을 검색해서 ID와 ARS 번호를 찾습니다. city_code는 서울:11, 경기도:12, 인천:23 등입니다.")
+def search_station(keyword: str, city_code: str = "11") -> str:
+    print(f"[Tool] 정류장 검색: {keyword}, 도시코드: {city_code}")
     url = "https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnNoList"
-    params = {"serviceKey": DECODING_KEY, "cityCode": "11", "nodeNm": keyword, "numOfRows": 5, "_type": "json"}
+    
+    # SERVICE_KEY는 위에서 unquote 한 키를 사용하세요
+    params = {
+        "serviceKey": SERVICE_KEY, 
+        "cityCode": city_code, 
+        "nodeNm": keyword, 
+        "numOfRows": 5, 
+        "_type": "json"
+    }
     
     try:
         response = requests.get(url, params=params, timeout=10)
+        
+        # 디버깅: 실제로 호출된 URL 확인 (한글이 잘 들어갔는지 확인용)
+        print(f"[Debug] 요청 URL: {response.url}") 
+        
         try: data = response.json()
-        except: return f"Error parsing JSON: {response.text}"
+        except: return f"Error: {response.text}"
         
         if 'response' not in data: return f"API Error: {data}"
-        if data['response']['header']['resultCode'] != '00': return "Public Data API Error"
-        if data['response']['body']['totalCount'] == 0: return "검색 결과 없음"
+        
+        # 결과가 0건일 때 메시지 개선
+        if data['response']['body']['totalCount'] == 0: 
+            return f"검색 결과가 없습니다. (도시코드 '{city_code}'에서 '{keyword}'를 찾지 못함. 도시코드를 변경해보세요.)"
         
         items = data['response']['body']['items']['item']
         if isinstance(items, dict): items = [items]
         
-        result = f"'{keyword}' 검색 결과:\n"
+        result = f"🔍 '{keyword}' 검색 결과 (도시코드 {city_code}):\n"
         for item in items:
             result += f"- {item.get('nodeNm')} (ID: {item.get('nodeid')})\n"
         return result
     except Exception as e: return f"Error: {str(e)}"
+
 
 def check_arrival(city_code: str, station_id: str) -> str:
     """특정 정류장의 버스 도착 정보를 실시간으로 조회합니다."""
@@ -60,7 +75,7 @@ def check_arrival(city_code: str, station_id: str) -> str:
         items = data['response']['body']['items']['item']
         if isinstance(items, dict): items = [items]
         
-        result = f"🚌 정류장(ID:{station_id}) 도착 정보:\n"
+        result = f"정류장(ID:{station_id}) 도착 정보:\n"
         for item in items:
             min_left = int(item.get('arrtime')) // 60
             result += f"- [{item.get('routeno')}번] {min_left}분 후\n"
