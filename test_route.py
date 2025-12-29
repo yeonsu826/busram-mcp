@@ -45,4 +45,4 @@ def test_remote_server(keyword):
 
 if __name__ == "__main__":
     # 테스트할 정류장 이름
-    test_remote_server("상명대후문")
+    test_remote_server("하림각")
