@@ -1,59 +1,38 @@
-from mcp.server.fastmcp import FastMCP
-import requests
-import os
+# =================================================================
+# BusRam MCP Server (Stateless HTTP / JSON-RPC Version)
+# =================================================================
 import uvicorn
-from mcp.server.sse import SseServerTransport
+import requests
+import urllib.parse
+import os
+import json
+import inspect
 from starlette.applications import Starlette
 from starlette.routing import Route
-from starlette.responses import JSONResponse, Response
+from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
-from urllib.parse import unquote
 
-# 1. 서버 설정
-mcp = FastMCP("BusRam")
+# 1. 설정 및 키
+# -----------------------------------------------------------------
+DECODING_KEY = "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg==" # 공공데이터포털에서 발급받은 서비스 키 (디코딩된 상태)
 
-# [중요] 키 관리: Decoding Key를 입력받거나, Encoding Key라면 디코딩해서 사용
-
-RAW_KEY = "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg=="
-# 만약 키가 %2B 등으로 시작한다면 아래 코드가 자동으로 디코딩해서 처리합니다.
-SERVICE_KEY = unquote(RAW_KEY) 
-
-@mcp.tool(description="정류장 이름을 검색해서 ID와 ARS 번호를 찾습니다. city_code는 서울:11, 경기도:12 등입니다.")
-def search_station(keyword: str, city_code: str = "11") -> str:
-    print(f"[Tool] 정류장 검색 시작: {keyword} (도시: {city_code})")
-    
-    # 주의: 이 API(BusSttnInfoInqireService)는 '버스도착정보'와 별도로 신청해야 할 수 있습니다.
+# 2. 도구(Tool) 실제 함수 정의
+# -----------------------------------------------------------------
+def search_station(keyword: str) -> str:
+    """정류장 이름을 검색해서 ID와 ARS 번호를 찾습니다."""
+    print(f"[Tool Exec] search_station: {keyword}")
     url = "https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnNoList"
-    
-    # serviceKey는 requests가 자동으로 인코딩하므로, 여기서는 디코딩된 순수 키를 줍니다.
-    params = {
-        "serviceKey": SERVICE_KEY, 
-        "cityCode": city_code, 
-        "nodeNm": keyword, 
-        "numOfRows": 5, 
-        "_type": "json"
-    }
+    params = {"serviceKey": DECODING_KEY, "cityCode": "11", "nodeNm": keyword, "numOfRows": 5, "_type": "json"}
     
     try:
         response = requests.get(url, params=params, timeout=10)
-        # 응답 내용 디버깅용 출력
-        print(f"[Debug] 응답 코드: {response.status_code}")
+        try: data = response.json()
+        except: return f"Error parsing JSON: {response.text}"
         
-        try: 
-            data = response.json()
-        except: 
-            return f"API 응답이 JSON이 아닙니다. API 키 오류일 수 있습니다.\n응답내용: {response.text[:200]}"
-        
-        if 'response' not in data: 
-            return f"API 구조 에러: {data}"
-            
-        header = data['response'].get('header', {})
-        if header.get('resultCode') != '00':
-            return f"API 에러 발생 (Code: {header.get('resultCode')}): {header.get('resultMsg')}"
-
-        if data['response']['body']['totalCount'] == 0: 
-            return f"'{keyword}'에 대한 검색 결과가 없습니다."
+        if 'response' not in data: return f"API Error: {data}"
+        if data['response']['header']['resultCode'] != '00': return "Public Data API Error"
+        if data['response']['body']['totalCount'] == 0: return "검색 결과 없음"
         
         items = data['response']['body']['items']['item']
         if isinstance(items, dict): items = [items]
@@ -62,83 +41,143 @@ def search_station(keyword: str, city_code: str = "11") -> str:
         for item in items:
             result += f"- {item.get('nodeNm')} (ID: {item.get('nodeid')})\n"
         return result
-    except Exception as e: 
-        return f"시스템 에러: {str(e)}"
+    except Exception as e: return f"Error: {str(e)}"
 
-@mcp.tool(description="정류장 ID로 버스 도착 정보를 조회합니다.")
 def check_arrival(city_code: str, station_id: str) -> str:
-    print(f"[Tool] 도착 정보 조회: {station_id}")
+    """특정 정류장의 버스 도착 정보를 실시간으로 조회합니다."""
+    print(f"[Tool Exec] check_arrival: {station_id}")
     url = "https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
-    
-    params = {
-        "serviceKey": SERVICE_KEY, 
-        "cityCode": city_code, 
-        "nodeId": station_id, 
-        "numOfRows": 10, 
-        "_type": "json"
-    }
+    params = {"serviceKey": DECODING_KEY, "cityCode": city_code, "nodeId": station_id, "numOfRows": 10, "_type": "json"}
     
     try:
         response = requests.get(url, params=params, timeout=10)
-        
         try: data = response.json()
         except: return f"Error parsing JSON: {response.text}"
         
         if 'response' not in data: return f"API Error: {data}"
-        
-        header = data['response'].get('header', {})
-        if header.get('resultCode') != '00':
-             return f"API Key Error or Limit Exceeded: {header.get('resultMsg')}"
-
-        if data['response']['body']['totalCount'] == 0: 
-            return "현재 도착 예정인 버스가 없습니다."
+        if data['response']['body']['totalCount'] == 0: return "도착 정보 없음"
         
         items = data['response']['body']['items']['item']
         if isinstance(items, dict): items = [items]
         
-        result = f"정류장(ID:{station_id}) 도착 정보:\n"
+        result = f"🚌 정류장(ID:{station_id}) 도착 정보:\n"
         for item in items:
-            arr_time = item.get('arrtime')
-            min_left = int(arr_time) // 60 if arr_time else 0
-            route_no = item.get('routeno')
-            # 2분 미만은 '잠시 후'로 표시 등 사용자 친화적 가공
-            msg = f"{min_left}분 후" if min_left > 1 else "잠시 후 도착"
-            result += f"- [{route_no}번] {msg}\n"
+            min_left = int(item.get('arrtime')) // 60
+            result += f"- [{item.get('routeno')}번] {min_left}분 후\n"
         return result
     except Exception as e: return f"Error: {str(e)}"
 
-# 3. Starlette 설정 (Kakao Play MCP 등록용)
-server = mcp._mcp_server
-sse = SseServerTransport("/mcp")
+# 3. 도구 등록부 (카카오에게 보여줄 메뉴판)
+# -----------------------------------------------------------------
+TOOLS = [
+    {
+        "name": "search_station",
+        "description": "정류장 이름을 검색해서 ID와 ARS 번호를 찾습니다. 사용자가 '강남역' 등을 물어볼 때 사용합니다.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "keyword": {"type": "string", "description": "검색할 정류장 이름 (예: 강남역)"}
+            },
+            "required": ["keyword"]
+        },
+        "func": search_station
+    },
+    {
+        "name": "check_arrival",
+        "description": "특정 정류장의 버스 도착 정보를 실시간으로 조회합니다.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "city_code": {"type": "string", "description": "도시 코드 (서울: 11)"},
+                "station_id": {"type": "string", "description": "정류장 ID"}
+            },
+            "required": ["city_code", "station_id"]
+        },
+        "func": check_arrival
+    }
+]
 
-class AlreadyHandledResponse(Response):
-    async def __call__(self, scope, receive, send): return
-
-async def handle_sse_connect(request):
-    print(f"[SSE] 연결 시도")
-    async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-        await server.run(streams[0], streams[1], server.create_initialization_options())
-    return AlreadyHandledResponse()
-
-async def handle_sse_message(request):
-    # Kakao Play MCP 등에서 헬스 체크용으로 호출할 수 있음
-    if "session_id" not in request.query_params:
-        print("[Check] Health Check Ping -> 200 OK")
-        return JSONResponse({"status": "healthy"})
-
+# 4. JSON-RPC 처리 로직 (핵심: SSE 제거하고 직접 처리)
+# -----------------------------------------------------------------
+async def handle_mcp_request(request):
     try:
-        await sse.handle_post_message(request.scope, request.receive, request._send)
+        body = await request.json()
+        method = body.get("method")
+        msg_id = body.get("id")
+        
+        print(f"[POST] Method: {method}")
+
+        # 1. 초기화 요청 (initialize)
+        if method == "initialize":
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "BusRam", "version": "1.0.0"}
+                }
+            })
+
+        # 2. 도구 목록 요청 (tools/list)
+        elif method == "tools/list":
+            return JSONResponse({
+                "jsonrpc": "2.0",
+                "id": msg_id,
+                "result": {
+                    "tools": [{k: v for k, v in t.items() if k != 'func'} for t in TOOLS]
+                }
+            })
+
+        # 3. 도구 실행 요청 (tools/call)
+        elif method == "tools/call":
+            params = body.get("params", {})
+            tool_name = params.get("name")
+            args = params.get("arguments", {})
+            
+            tool = next((t for t in TOOLS if t["name"] == tool_name), None)
+            
+            if tool:
+                try:
+                    # 함수 실행
+                    result_text = tool["func"](**args)
+                    return JSONResponse({
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {
+                            "content": [{"type": "text", "text": result_text}],
+                            "isError": False
+                        }
+                    })
+                except Exception as e:
+                    return JSONResponse({
+                        "jsonrpc": "2.0", 
+                        "id": msg_id, 
+                        "result": {
+                            "content": [{"type": "text", "text": f"Error: {str(e)}"}],
+                            "isError": True
+                        }
+                    })
+            else:
+                return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": "Method not found"}})
+
+        # 4. 기타 (ping 등)
+        else:
+            return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {}})
+
     except Exception as e:
-        print(f"Message Error: {e}")
-    return AlreadyHandledResponse()
+        print(f"Error: {e}")
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 async def handle_root(request):
-    return JSONResponse({"status": "Bus MCP Server is Running!"})
+    return JSONResponse({"status": "ok", "service": "BusRam MCP (Stateless)"})
 
+# 5. 서버 실행
+# -----------------------------------------------------------------
 middleware = [
     Middleware(
         CORSMiddleware,
-        allow_origins=["*"], # 중요: Kakao 서버에서의 접근 허용
+        allow_origins=["*"],
         allow_methods=["*"],
         allow_headers=["*"],
     )
@@ -147,9 +186,12 @@ middleware = [
 app = Starlette(
     debug=True,
     routes=[
-        Route("/mcp", endpoint=handle_sse_connect, methods=["GET"]),
-        Route("/mcp", endpoint=handle_sse_message, methods=["POST"]),
+        Route("/mcp", endpoint=handle_mcp_request, methods=["POST"]),
         Route("/", endpoint=handle_root, methods=["GET"])
     ],
     middleware=middleware
 )
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
