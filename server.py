@@ -15,8 +15,7 @@ from starlette.middleware.cors import CORSMiddleware
 # 1. 설정 및 CSV 데이터 로드 (서버 시작 시 1회 실행)
 # -----------------------------------------------------------------
 # ⚠️ 본인의 [Encoding] 인증키를 여기에 넣으세요 (URL에 직접 붙일 용도)
-DECODING_KEY = os.environ.get("DECODING_KEY", "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg==")
-
+ENCODING_KEY = "ezGwhdiNnVtd%2BHvkfiKgr%2FZ4r%2BgvfeUIRz%2FdVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI%2B%2FpJFoYr9Ce%2BTDg%3D%3D"
 
 print("📂 [System] 정류장 데이터(CSV) 로딩 중...")
 CSV_PATH = "station_data.csv"
