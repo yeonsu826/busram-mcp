@@ -6,7 +6,6 @@ import requests
 import urllib.parse
 import os
 import json
-import inspect
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.responses import JSONResponse
@@ -15,18 +14,20 @@ from starlette.middleware.cors import CORSMiddleware
 
 # 1. 설정 및 키
 # -----------------------------------------------------------------
-DECODING_KEY = "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg==" # 공공데이터포털에서 발급받은 서비스 키 (디코딩된 상태)
+# ⚠️ 주의: Render 환경변수에 DECODING_KEY가 없다면 아래 문자열이 사용됩니다.
+# (보안을 위해 실제 배포시엔 Render Environment Variables에 키를 넣는 것을 추천합니다)
+DECODING_KEY = os.environ.get("DECODING_KEY", "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg==")
 
 # 2. 도구(Tool) 실제 함수 정의
 # -----------------------------------------------------------------
-@mcp.tool(description="정류장 이름을 검색해서 ID와 ARS 번호를 찾습니다. city_code는 서울:11, 경기도:12, 인천:23 등입니다.")
+# ❌ 수정됨: @mcp.tool 데코레이터 삭제함 (이제 필요 없음)
 def search_station(keyword: str, city_code: str = "11") -> str:
     print(f"[Tool] 정류장 검색: {keyword}, 도시코드: {city_code}")
     url = "https://apis.data.go.kr/1613000/BusSttnInfoInqireService/getSttnNoList"
     
-    # SERVICE_KEY는 위에서 unquote 한 키를 사용하세요
+    # ✅ 수정됨: SERVICE_KEY -> DECODING_KEY로 변수명 통일
     params = {
-        "serviceKey": SERVICE_KEY, 
+        "serviceKey": DECODING_KEY, 
         "cityCode": city_code, 
         "nodeNm": keyword, 
         "numOfRows": 5, 
@@ -36,7 +37,7 @@ def search_station(keyword: str, city_code: str = "11") -> str:
     try:
         response = requests.get(url, params=params, timeout=10)
         
-        # 디버깅: 실제로 호출된 URL 확인 (한글이 잘 들어갔는지 확인용)
+        # 디버깅: 실제로 호출된 URL 확인
         print(f"[Debug] 요청 URL: {response.url}") 
         
         try: data = response.json()
@@ -44,7 +45,6 @@ def search_station(keyword: str, city_code: str = "11") -> str:
         
         if 'response' not in data: return f"API Error: {data}"
         
-        # 결과가 0건일 때 메시지 개선
         if data['response']['body']['totalCount'] == 0: 
             return f"검색 결과가 없습니다. (도시코드 '{city_code}'에서 '{keyword}'를 찾지 못함. 도시코드를 변경해보세요.)"
         
@@ -62,6 +62,8 @@ def check_arrival(city_code: str, station_id: str) -> str:
     """특정 정류장의 버스 도착 정보를 실시간으로 조회합니다."""
     print(f"[Tool Exec] check_arrival: {station_id}")
     url = "https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
+    
+    # ✅ 수정됨: DECODING_KEY 사용 확인
     params = {"serviceKey": DECODING_KEY, "cityCode": city_code, "nodeId": station_id, "numOfRows": 10, "_type": "json"}
     
     try:
@@ -75,7 +77,7 @@ def check_arrival(city_code: str, station_id: str) -> str:
         items = data['response']['body']['items']['item']
         if isinstance(items, dict): items = [items]
         
-        result = f"정류장(ID:{station_id}) 도착 정보:\n"
+        result = f"🚌 정류장(ID:{station_id}) 도착 정보:\n"
         for item in items:
             min_left = int(item.get('arrtime')) // 60
             result += f"- [{item.get('routeno')}번] {min_left}분 후\n"
@@ -91,7 +93,8 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "keyword": {"type": "string", "description": "검색할 정류장 이름 (예: 강남역)"}
+                "keyword": {"type": "string", "description": "검색할 정류장 이름 (예: 강남역)"},
+                "city_code": {"type": "string", "description": "도시 코드 (서울: 11, 경기: 12)"}
             },
             "required": ["keyword"]
         },
@@ -112,7 +115,7 @@ TOOLS = [
     }
 ]
 
-# 4. JSON-RPC 처리 로직 (핵심: SSE 제거하고 직접 처리)
+# 4. JSON-RPC 처리 로직
 # -----------------------------------------------------------------
 async def handle_mcp_request(request):
     try:
@@ -122,7 +125,6 @@ async def handle_mcp_request(request):
         
         print(f"[POST] Method: {method}")
 
-        # 1. 초기화 요청 (initialize)
         if method == "initialize":
             return JSONResponse({
                 "jsonrpc": "2.0",
@@ -134,8 +136,8 @@ async def handle_mcp_request(request):
                 }
             })
 
-        # 2. 도구 목록 요청 (tools/list)
         elif method == "tools/list":
+            # func 키를 제외하고 전송
             return JSONResponse({
                 "jsonrpc": "2.0",
                 "id": msg_id,
@@ -144,7 +146,6 @@ async def handle_mcp_request(request):
                 }
             })
 
-        # 3. 도구 실행 요청 (tools/call)
         elif method == "tools/call":
             params = body.get("params", {})
             tool_name = params.get("name")
@@ -176,7 +177,6 @@ async def handle_mcp_request(request):
             else:
                 return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": "Method not found"}})
 
-        # 4. 기타 (ping 등)
         else:
             return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {}})
 
