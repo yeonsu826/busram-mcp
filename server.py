@@ -14,7 +14,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 # 1. 설정 및 CSV 데이터 로드
-ENCODING_KEY = os.environ.get("ENCODING_KEY", "여기에_본인의_Encoding_키를_넣으세요")
+ENCODING_KEY = os.environ.get("ENCODING_KEY", "ezGwhdiNnVtd%2BHvkfiKgr%2FZ4r%2BgvfeUIRz%2FdVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI%2B%2FpJFoYr9Ce%2BTDg%3D%3D")
 
 print("📂 [System] 정류장 데이터(CSV) 로딩 중...")
 CSV_PATH = "station_data.csv"
