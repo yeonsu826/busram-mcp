@@ -1,5 +1,5 @@
 # =================================================================
-# BusRam MCP Server (Ultimate Final: StationInfo API)
+# BusRam MCP Server (Final: Seoul stId Version)
 # =================================================================
 import uvicorn
 import requests
@@ -14,7 +14,7 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 
 # 1. 설정 및 CSV 데이터 로드
-ENCODING_KEY = os.environ.get("ENCODING_KEY", "ezGwhdiNnVtd%2BHvkfiKgr%2FZ4r%2BgvfeUIRz%2FdVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI%2B%2FpJFoYr9Ce%2BTDg%3D%3D")
+ENCODING_KEY = os.environ.get("ENCODING_KEY", "여기에_본인의_Encoding_키를_넣으세요")
 
 print("📂 [System] 정류장 데이터(CSV) 로딩 중...")
 CSV_PATH = "station_data.csv"
@@ -48,36 +48,36 @@ def get_bus_arrival(keyword: str) -> str:
     targets = results.head(4)
     final_output = f"🚏 '{keyword}' 도착 정보:\n"
     
-    # URL 주소 변경! (arrive -> stationinfo)
-    url_national = "https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
-    url_seoul = "http://ws.bus.go.kr/api/rest/stationinfo/getStationByUid" # 👈 여기를 바꿨습니다!
+    # 🟢 [변경됨] 서울용 API 주소를 'arrive' 서비스로 변경 (이미 권한 있음!)
+    url_seoul = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId"
     url_gyeonggi = "http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList"
+    url_national = "https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
     
     for _, row in targets.iterrows():
         station_name = row['정류장명']
         city_code = row['도시코드']
-        raw_id = row['정류장번호']
+        raw_id = row['정류장번호'] # 서울에서는 이게 stId (9자리)
         
-        # ARS 번호 5자리 맞추기
+        # ARS 번호는 화면 표시용으로만 사용
         ars_raw = row.get('모바일단축번호', '')
-        ars_id = ""
+        ars_display = ""
         try:
             if pd.notnull(ars_raw) and str(ars_raw).strip() != "":
-                ars_id = str(int(float(ars_raw))).zfill(5)
+                ars_display = f"(ARS: {str(int(float(ars_raw))).zfill(5)})"
         except: pass
 
-        ars_display = f"(ARS: {ars_id})" if ars_id else ""
+        # ID에서 숫자만 추출 (서울 stId, 경기 stationId, 전국 nodeId 공통)
         station_id = re.sub(r'[^0-9]', '', raw_id) 
         
         # ---------------------------------------------------------
-        # [Case 1] 서울 (정류소정보 API 사용)
+        # [Case 1] 서울 (stId 방식 적용)
         # ---------------------------------------------------------
-        if city_code == '11' and ars_id:
+        if city_code == '11':
             final_output += f"\n📍 {station_name} {ars_display} [서울]\n"
             
             params = {
                 "serviceKey": ENCODING_KEY,
-                "arsId": ars_id, # 이제 ARS 번호를 씁니다!
+                "stId": station_id, # 🟢 arsId 대신 stId 사용!
                 "resultType": "json"
             }
             
@@ -85,6 +85,13 @@ def get_bus_arrival(keyword: str) -> str:
                 response = requests.get(url_seoul, params=params, timeout=5)
                 data = response.json()
                 
+                # 서울시 에러 체크
+                if 'msgHeader' in data and data['msgHeader']['headerCd'] != '0':
+                     # 에러 코드가 0이 아니면
+                     err_msg = data['msgHeader'].get('headerMsg', '알 수 없는 에러')
+                     final_output += f"   - (API 메시지: {err_msg})\n"
+                     continue
+
                 if 'msgBody' not in data or not data['msgBody']['itemList']:
                     final_output += "   💤 도착 예정 버스 없음\n"
                     continue
@@ -93,14 +100,13 @@ def get_bus_arrival(keyword: str) -> str:
                 if isinstance(items, dict): items = [items]
                 
                 for bus in items:
-                    rt_nm = bus.get('rtNm')      # 노선명 (750B)
-                    msg1 = bus.get('arrmsg1')    # 첫번째 도착 정보
-                    msg2 = bus.get('arrmsg2')    # 두번째 도착 정보
+                    rt_nm = bus.get('rtNm')      # 버스 번호
+                    msg1 = bus.get('arrmsg1')    # 첫번째 도착
+                    msg2 = bus.get('arrmsg2')    # 두번째 도착
                     
-                    # 도착 정보 예쁘게 출력
                     bus_info = f"   🚌 [{rt_nm}] {msg1}"
                     if msg2 and msg2 != "출발대기":
-                        bus_info += f"  (다음: {msg2})"
+                         bus_info += f"  (다음: {msg2})"
                     final_output += bus_info + "\n"
 
             except Exception as e:
@@ -125,19 +131,17 @@ def get_bus_arrival(keyword: str) -> str:
                         min_left = bus.get('predictTime1')
                         stops = bus.get('locationNo1')
                         final_output += f"   🚌 [버스] {min_left}분 후 ({stops}전)\n"
-                except:
-                     pass # XML 파싱이나 데이터 없음은 패스 (전국 API로 fallback)
+                except: pass
             except: pass
             
             if "버스" not in final_output and "[경기]" in final_output:
-                 pass # Fallback으로 넘어감
+                 pass # Fallback
 
         # ---------------------------------------------------------
         # [Case 3] 전국 (Fallback)
         # ---------------------------------------------------------
         if "[서울]" not in final_output and "[경기]" not in final_output:
-            # (경기 데이터가 안 나왔을 때 헤더 중복 방지 로직은 생략하고 단순화)
-            if "📍" not in final_output: # 헤더가 아예 안 찍혔으면 찍음
+            if "📍" not in final_output: 
                 final_output += f"\n📍 {station_name} {ars_display} [전국]\n"
             
             params = {"serviceKey": ENCODING_KEY, "cityCode": city_code, "nodeId": station_id, "numOfRows": 5, "_type": "json"}
@@ -157,7 +161,7 @@ def get_bus_arrival(keyword: str) -> str:
             
     return final_output
 
-# (나머지 Tools, Handler, Main 부분은 기존과 동일)
+# (Tools, Handler는 이전과 동일)
 TOOLS = [{"name": "get_bus_arrival", "description": "...", "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}, "func": get_bus_arrival}]
 async def handle_mcp_request(request):
     try:
