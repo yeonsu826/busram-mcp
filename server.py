@@ -1,5 +1,5 @@
 # =================================================================
-# BusRam MCP Server (Final: Seoul stId Version)
+# BusRam MCP Server (Final: Seoul stId + Raw Key)
 # =================================================================
 import uvicorn
 import requests
@@ -48,7 +48,8 @@ def get_bus_arrival(keyword: str) -> str:
     targets = results.head(4)
     final_output = f"🚏 '{keyword}' 도착 정보:\n"
     
-    # 🟢 [변경됨] 서울용 API 주소를 'arrive' 서비스로 변경 (이미 권한 있음!)
+    # 🟢 [변경] 서울 API 주소를 'arrive'(버스도착정보) 서비스로 변경
+    # 아까 브라우저에서 성공했던 그 주소입니다!
     url_seoul = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId"
     url_gyeonggi = "http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList"
     url_national = "https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
@@ -56,7 +57,7 @@ def get_bus_arrival(keyword: str) -> str:
     for _, row in targets.iterrows():
         station_name = row['정류장명']
         city_code = row['도시코드']
-        raw_id = row['정류장번호'] # 서울에서는 이게 stId (9자리)
+        raw_id = row['정류장번호'] 
         
         # ARS 번호는 화면 표시용으로만 사용
         ars_raw = row.get('모바일단축번호', '')
@@ -66,28 +67,26 @@ def get_bus_arrival(keyword: str) -> str:
                 ars_display = f"(ARS: {str(int(float(ars_raw))).zfill(5)})"
         except: pass
 
-        # ID에서 숫자만 추출 (서울 stId, 경기 stationId, 전국 nodeId 공통)
         station_id = re.sub(r'[^0-9]', '', raw_id) 
         
         # ---------------------------------------------------------
-        # [Case 1] 서울 (stId 방식 적용)
+        # [Case 1] 서울 (stId 방식 + 키 직접 주입)
         # ---------------------------------------------------------
         if city_code == '11':
             final_output += f"\n📍 {station_name} {ars_display} [서울]\n"
             
+            # 🟢 [핵심] 키를 URL에 직접 붙이고, stId를 사용합니다.
+            request_url = f"{url_seoul}?serviceKey={ENCODING_KEY}"
             params = {
-                "serviceKey": ENCODING_KEY,
-                "stId": station_id, # 🟢 arsId 대신 stId 사용!
+                "stId": station_id,  # CSV의 '정류장번호' (9자리) 사용
                 "resultType": "json"
             }
             
             try:
-                response = requests.get(url_seoul, params=params, timeout=5)
+                response = requests.get(request_url, params=params, timeout=5)
                 data = response.json()
                 
-                # 서울시 에러 체크
                 if 'msgHeader' in data and data['msgHeader']['headerCd'] != '0':
-                     # 에러 코드가 0이 아니면
                      err_msg = data['msgHeader'].get('headerMsg', '알 수 없는 에러')
                      final_output += f"   - (API 메시지: {err_msg})\n"
                      continue
@@ -100,9 +99,9 @@ def get_bus_arrival(keyword: str) -> str:
                 if isinstance(items, dict): items = [items]
                 
                 for bus in items:
-                    rt_nm = bus.get('rtNm')      # 버스 번호
-                    msg1 = bus.get('arrmsg1')    # 첫번째 도착
-                    msg2 = bus.get('arrmsg2')    # 두번째 도착
+                    rt_nm = bus.get('rtNm')      
+                    msg1 = bus.get('arrmsg1')    
+                    msg2 = bus.get('arrmsg2')    
                     
                     bus_info = f"   🚌 [{rt_nm}] {msg1}"
                     if msg2 and msg2 != "출발대기":
@@ -117,10 +116,12 @@ def get_bus_arrival(keyword: str) -> str:
         # ---------------------------------------------------------
         elif city_code.startswith('31') or city_code == '12': 
             final_output += f"\n📍 {station_name} {ars_display} [경기]\n"
-            params = {"serviceKey": ENCODING_KEY, "stationId": station_id}
+            
+            request_url = f"{url_gyeonggi}?serviceKey={ENCODING_KEY}"
+            params = {"stationId": station_id}
             
             try:
-                response = requests.get(url_gyeonggi, params=params, timeout=5)
+                response = requests.get(request_url, params=params, timeout=5)
                 try: 
                     data = response.json()
                     items = data['response']['msgBody']['busArrivalList']
@@ -135,7 +136,7 @@ def get_bus_arrival(keyword: str) -> str:
             except: pass
             
             if "버스" not in final_output and "[경기]" in final_output:
-                 pass # Fallback
+                 pass 
 
         # ---------------------------------------------------------
         # [Case 3] 전국 (Fallback)
@@ -144,9 +145,10 @@ def get_bus_arrival(keyword: str) -> str:
             if "📍" not in final_output: 
                 final_output += f"\n📍 {station_name} {ars_display} [전국]\n"
             
-            params = {"serviceKey": ENCODING_KEY, "cityCode": city_code, "nodeId": station_id, "numOfRows": 5, "_type": "json"}
+            request_url = f"{url_national}?serviceKey={ENCODING_KEY}"
+            params = {"cityCode": city_code, "nodeId": station_id, "numOfRows": 5, "_type": "json"}
             try:
-                response = requests.get(url_national, params=params, timeout=5)
+                response = requests.get(request_url, params=params, timeout=5)
                 data = response.json()
                 items = data['response']['body']['items']['item']
                 if isinstance(items, dict): items = [items]
