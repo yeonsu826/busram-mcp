@@ -12,6 +12,7 @@ from starlette.routing import Route
 from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
+from starlette.concurrency import run_in_threadpool
 
 # 1. 설정 및 CSV 데이터 로드
 ENCODING_KEY = os.environ.get("ENCODING_KEY", "ezGwhdiNnVtd%2BHvkfiKgr%2FZ4r%2BgvfeUIRz%2FdVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI%2B%2FpJFoYr9Ce%2BTDg%3D%3D")
@@ -101,9 +102,13 @@ def get_bus_arrival(keyword: str) -> str:
                 for bus in items:
                     rt_nm = bus.get('rtNm')      
                     msg1 = bus.get('arrmsg1')    
-                    msg2 = bus.get('arrmsg2')    
+                    msg2 = bus.get('arrmsg2')
+                    now_station = bus.get('stationNm1') # 현재 버스가 있는 정류장명
                     
                     bus_info = f"   🚌 [{rt_nm}] {msg1}"
+                    if now_station:
+                        bus_info += f" (🚩현재: {now_station})"
+
                     if msg2 and msg2 != "출발대기":
                          bus_info += f"  (다음: {msg2})"
                     final_output += bus_info + "\n"
@@ -173,7 +178,10 @@ async def handle_mcp_request(request):
         elif method == "tools/call":
             params = body.get("params", {}); tool_name = params.get("name"); args = params.get("arguments", {})
             tool = next((t for t in TOOLS if t["name"] == tool_name), None)
-            if tool: return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"content": [{"type": "text", "text": tool["func"](**args)}], "isError": False}})
+            if tool:
+                # 동기 함수(requests)를 별도 스레드에서 실행하여 서버 블로킹 방지
+                result_text = await run_in_threadpool(tool["func"], **args)
+                return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"content": [{"type": "text", "text": result_text}], "isError": False}})
             return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": "Method not found"}})
         return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {}})
     except Exception as e: return JSONResponse({"error": str(e)}, status_code=500)
