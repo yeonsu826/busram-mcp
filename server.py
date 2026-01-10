@@ -67,7 +67,11 @@ def get_bus_arrival(keyword: str) -> str:
     if results.empty: return f"❌ '{keyword}' 검색 결과가 없습니다."
     
     targets = results.head(4)
-    final_output = f"🚏 '{keyword}' 분석 리포트:\n"
+    # 기존 코드 (server.py)
+    # final_output = f"🚏 '{keyword}' 분석 리포트:\n"
+
+    # 👇 이렇게 바꿔보세요 (버전 표시 추가)
+    final_output = f"🚏 '{keyword}' 분석 리포트 (V2 상세분석):\n"
     
     url_seoul = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId"
     url_gyeonggi = "http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList"
