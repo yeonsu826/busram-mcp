@@ -1,5 +1,5 @@
 # =================================================================
-# BusRam MCP Server (V7: Safe Key Handling Fix)
+# BusRam MCP Server (V9 Final: Route Analysis & Key Fix)
 # =================================================================
 import uvicorn
 import requests
@@ -8,6 +8,7 @@ import os
 import json
 import re
 import math
+from urllib.parse import unquote
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.responses import JSONResponse
@@ -15,175 +16,193 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
-# 1. 설정 (인코딩된 키 그대로 사용)
+# 1. 설정 (사용자님의 인코딩된 키)
 ENCODING_KEY = os.environ.get("ENCODING_KEY", "ezGwhdiNnVtd%2BHvkfiKgr%2FZ4r%2BgvfeUIRz%2FdVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI%2B%2FpJFoYr9Ce%2BTDg%3D%3D")
+
+# 🟢 [핵심 1] 키 디코딩 (HTML 에러 방지용)
+# requests 라이브러리는 전송 시 자동으로 인코딩을 하므로, 우리는 '풀어서(Decode)' 줘야 합니다.
+DECODED_KEY = unquote(ENCODING_KEY)
+
+print("📂 [System] 데이터 로딩 시작...")
 STATION_CSV = "station_data.csv"
 ROUTE_CSV = "route_data.csv"
 
-print("📂 [System] 데이터 로딩 시작...")
+# -----------------------------------------------------------------
+# 📂 데이터 로드
+# -----------------------------------------------------------------
 
-# 정류장 데이터 로드
+# 1) 정류장 데이터 (위치 찾기용)
 try:
     try: df_stations = pd.read_csv(STATION_CSV, encoding='cp949')
     except: df_stations = pd.read_csv(STATION_CSV, encoding='utf-8')
+    
     df_stations['정류장명'] = df_stations['정류장명'].astype(str)
     df_stations['도시코드'] = df_stations['도시코드'].astype(str)
-    df_stations['정류장번호'] = df_stations['정류장번호'].astype(str)
-    df_stations['clean_id'] = df_stations['정류장번호'].apply(lambda x: re.sub(r'[^0-9]', '', x))
-    print(f"✅ [Stations] {len(df_stations)}개 로드 완료.")
+    # 정류장번호(stId) 정제: 숫자만 남김
+    df_stations['clean_id'] = df_stations['정류장번호'].apply(lambda x: re.sub(r'[^0-9]', '', str(x)))
+    
+    print(f"✅ [Stations] {len(df_stations)}개 정류장 로드 완료.")
 except Exception as e:
     print(f"❌ [Stations] 로드 실패: {e}")
     df_stations = pd.DataFrame()
 
-# 노선 데이터 로드
+# 2) 노선 데이터 (방면 찾기용 - 치트키!)
 try:
     df_routes = pd.read_csv(ROUTE_CSV, encoding='utf-8')
+    
+    # 데이터 타입 안전하게 변환
     df_routes['노선명'] = df_routes['노선명'].astype(str)
-    df_routes['ARS_ID'] = df_routes['ARS_ID'].astype(str).apply(lambda x: x.split('.')[0].zfill(5))
+    # NODE_ID(stId) 정제: 숫자만 남김 (매칭용)
+    df_routes['clean_node_id'] = df_routes['NODE_ID'].apply(lambda x: re.sub(r'[^0-9]', '', str(x)))
+    # 순번 정수화
     df_routes['순번'] = pd.to_numeric(df_routes['순번'], errors='coerce').fillna(0).astype(int)
-    print(f"✅ [Routes] {len(df_routes)}개 구간 로드 완료.")
+    
+    print(f"✅ [Routes] {len(df_routes)}개 노선 정보 로드 완료.")
 except Exception as e:
     print(f"❌ [Routes] 로드 실패: {e}")
     df_routes = pd.DataFrame()
 
-# 2. 분석 함수들
-def calculate_bearing(lat1, lon1, lat2, lon2):
-    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    d_lon = lon2 - lon1
-    y = math.sin(d_lon) * math.cos(lat2)
-    x = math.cos(lat1) * math.sin(lat2) - (math.sin(lat1) * math.cos(lat2) * math.cos(d_lon))
-    initial_bearing = math.atan2(y, x)
-    return (math.degrees(initial_bearing) + 360) % 360
 
-def get_cardinal_direction(bearing):
-    directions = ['북(N)', '북동(NE)', '동(E)', '남동(SE)', '남(S)', '남서(SW)', '서(W)', '북서(NW)']
-    return directions[round(bearing / 45) % 8]
-
-def get_direction_from_csv(bus_no, current_ars_id):
+# -----------------------------------------------------------------
+# 🧮 분석 함수 (CSV에서 방면 찾기)
+# -----------------------------------------------------------------
+def get_direction_from_csv(bus_no, current_st_id):
+    """
+    CSV 노선도를 뒤져서 '다음 정류장'을 찾아내는 함수
+    """
     if df_routes.empty: return ""
+    
+    # 1. 해당 버스 노선만 필터링 (순번대로 정렬)
+    # 예: '150'번 버스의 전체 경로 가져오기
     route_path = df_routes[df_routes['노선명'] == bus_no].sort_values('순번')
+    
     if route_path.empty: return ""
 
-    current_node = route_path[route_path['ARS_ID'] == current_ars_id]
+    # 2. 현재 정류장(stId)이 이 노선의 몇 번째 순서인지 찾기
+    current_node = route_path[route_path['clean_node_id'] == current_st_id]
+    
     if current_node.empty: return ""
     
+    # (첫 번째 매칭되는 순번 사용 - 순환 노선 등은 약식 처리)
     current_seq = current_node.iloc[0]['순번']
+    
+    # 3. 바로 다음 정류장 (순번 + 1) 찾기
     next_node = route_path[route_path['순번'] == current_seq + 1]
     
     if not next_node.empty:
         next_name = next_node.iloc[0]['정류소명']
+        # 기왕이면 종점(마지막 정류장) 이름도 가져오기
         final_dest = route_path.iloc[-1]['정류소명']
-        return f"👉 {next_name} 쪽 ({final_dest} 방면)"
+        
+        return f"👉 {next_name}방향 ({final_dest}행)"
     else:
-        return "🏁 종점/차고지 부근"
+        return "🏁 종점 부근"
 
-# 3. 메인 도구
+
+# -----------------------------------------------------------------
+# 🛠️ Main Tool
+# -----------------------------------------------------------------
 def get_bus_arrival(keyword: str) -> str:
     print(f"[Tool] '{keyword}' 요청")
-    if df_stations.empty: return "❌ DB 로드 실패"
+    
+    if df_stations.empty: return "❌ 서버 에러: 데이터 로드 실패"
 
+    # 키워드 검색
     mask = df_stations['정류장명'].str.contains(keyword)
     results = df_stations[mask]
-    if results.empty: return f"❌ '{keyword}' 검색 결과 없음"
+    
+    if results.empty: return f"❌ '{keyword}' 검색 결과가 없습니다."
     
     targets = results.head(4)
-    final_output = f"🚏 '{keyword}' 분석 리포트 (V7 SafeKey):\n"
+    final_output = f"🚏 '{keyword}' 분석 리포트 (V9):"
     
-    # 기본 URL (서비스 키 제외)
-    base_url_seoul = "http://ws.bus.go.kr/api/rest/arrive/getStationByUidItem"
-    base_url_gyeonggi = "http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList"
+    # API 주소 (stId 기반 조회 - 가장 안정적)
+    url_seoul = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId"
     
     for _, row in targets.iterrows():
         station_name = row['정류장명']
         city_code = row['도시코드']
         raw_id = row['정류장번호'] 
-        current_lat = row['위도']
-        current_lng = row['경도']
         
+        # ARS 번호 (화면 표시용)
         ars_raw = row.get('모바일단축번호', '')
-        clean_arsId = ""
+        ars_display = ""
         try:
             if pd.notnull(ars_raw) and str(ars_raw).strip() != "":
-                clean_arsId = str(int(float(ars_raw))).zfill(5)
+                ars_display = f"(ARS: {str(int(float(ars_raw))).zfill(5)})"
         except: pass
         
-        ars_display = f"(ARS: {clean_arsId})" if clean_arsId else ""
-        station_id = re.sub(r'[^0-9]', '', raw_id) 
+        # ID 정제
+        station_id = re.sub(r'[^0-9]', '', str(raw_id))
         
-        # [Case 1] 서울
+        # ---------------------------------------------------------
+        # [Case 1] 서울 (API + CSV 노선 분석)
+        # ---------------------------------------------------------
         if city_code == '11':
-            final_output += f"\n📍 {station_name} {ars_display} [서울]"
+            final_output += f"\n\n📍 {station_name} {ars_display} [서울]"
             
-            if not clean_arsId:
-                final_output += "\n   ⚠️ ARS 번호 없음\n"
-                continue
-
-            # 🟢 [핵심 수정] 키를 params에 넣지 않고 URL에 직접 문자열로 붙임! (이중 인코딩 방지)
-            request_url = f"{base_url_seoul}?serviceKey={ENCODING_KEY}&arsId={clean_arsId}&resultType=json"
+            # 🟢 [핵심 2] Decoded Key 사용 (params가 다시 인코딩해줌)
+            params = {
+                "serviceKey": DECODED_KEY, 
+                "stId": station_id, 
+                "resultType": "json"
+            }
             
             try:
-                # params={} 비워두고 호출
-                response = requests.get(request_url, timeout=5)
+                response = requests.get(url_seoul, params=params, timeout=5)
                 
+                # XML 에러 방어
                 try: data = response.json()
                 except: 
-                    # HTML이 오면 여기서 잡힘
-                    final_output += f"\n   ⚠️ 응답 파싱 실패 (서버 에러). 원본: {response.text[:50]}...\n"
+                    # HTML이 오면 키 문제일 확률 99%
+                    final_output += f"\n   ⚠️ API 키 에러 발생. 원본: {response.text[:50]}..."
                     continue
 
                 if 'msgHeader' in data and data['msgHeader']['headerCd'] != '0':
                      err_msg = data['msgHeader'].get('headerMsg', '에러')
-                     final_output += f"\n   - (API 메시지: {err_msg})\n"
+                     final_output += f"\n   - (API 메시지: {err_msg})"
                      continue
 
                 if 'msgBody' not in data or not data['msgBody']['itemList']:
-                    final_output += "\n   💤 버스 없음\n"
+                    final_output += "\n   💤 도착 예정 버스 없음"
                     continue
                 
                 items = data['msgBody']['itemList']
                 if isinstance(items, dict): items = [items]
                 
                 for bus in items:
-                    rt_nm = bus.get('rtNm')
-                    msg1 = bus.get('arrmsg1')
-                    adirection = bus.get('adirection', '') 
-                    nxt_st_id = bus.get('nxtStnId', '')
+                    rt_nm = bus.get('rtNm')       # 버스 번호
+                    msg1 = bus.get('arrmsg1')     # 도착 예정 시간
                     
-                    # 1. 방면
+                    # 🟢 [핵심 3] 방면 찾기 (API가 안 주면 CSV에서 찾는다!)
+                    adirection = bus.get('adirection', '') 
+                    
                     dir_text = ""
                     if adirection and adirection != "None":
                         dir_text = f"👉 {adirection} 방면"
                     else:
-                        csv_dir = get_direction_from_csv(rt_nm, clean_arsId)
-                        if csv_dir: dir_text = csv_dir
+                        # API가 모르면 우리가 만든 족보(CSV) 검색
+                        csv_dir = get_direction_from_csv(rt_nm, station_id)
+                        if csv_dir:
+                            dir_text = csv_dir
 
-                    # 2. 방위각
-                    bearing_text = ""
-                    if nxt_st_id and str(nxt_st_id) != "0":
-                        next_st_info = df_stations[df_stations['clean_id'] == str(nxt_st_id)]
-                        if not next_st_info.empty:
-                            nxt_lat = next_st_info.iloc[0]['위도']
-                            nxt_lng = next_st_info.iloc[0]['경도']
-                            bearing = calculate_bearing(current_lat, current_lng, nxt_lat, nxt_lng)
-                            bearing_text = f" (🧭{get_cardinal_direction(bearing)})"
-                    
                     bus_info = f"\n   🚌 [{rt_nm}] {msg1}"
-                    if dir_text: bus_info += f" ({dir_text}{bearing_text})"
-                    elif bearing_text: bus_info += f" {bearing_text}"
+                    if dir_text:
+                        bus_info += f"  {dir_text}"
                         
                     final_output += bus_info
-                final_output += "\n"
 
             except Exception as e:
-                final_output += f"\n   - (에러: {str(e)})\n"
+                final_output += f"\n   - (통신 에러: {str(e)})"
 
-        # [Case 2] 경기
+        # [Case 2] 경기 (기존 유지)
         elif city_code.startswith('31') or city_code == '12': 
-            final_output += f"\n📍 {station_name} {ars_display} [경기]"
-            # 경기도 마찬가지로 직접 URL 구성
-            request_url = f"{base_url_gyeonggi}?serviceKey={ENCODING_KEY}&stationId={station_id}"
+            final_output += f"\n\n📍 {station_name} {ars_display} [경기]"
+            # 경기 API URL
+            url_gyeonggi = "http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList"
+            params = {"serviceKey": DECODED_KEY, "stationId": station_id}
             try:
-                response = requests.get(request_url, timeout=5)
+                response = requests.get(url_gyeonggi, params=params, timeout=5)
                 try: 
                     data = response.json()
                     items = data['response']['msgBody']['busArrivalList']
@@ -195,17 +214,23 @@ def get_bus_arrival(keyword: str) -> str:
                         final_output += f"\n   🚌 [버스] {min_left}분 후 ({stops}전)"
                 except: pass
             except: pass
-            if "버스" not in final_output and "[경기]" in final_output: pass
-            final_output += "\n"
+            if "버스" not in final_output and "[경기]" in final_output: pass 
 
-        # [Case 3] 전국
+        # [Case 3] 전국 (기존 유지)
         if "[서울]" not in final_output and "[경기]" not in final_output:
             if "📍" not in final_output: 
-                final_output += f"\n📍 {station_name} {ars_display} [전국]"
-            # 전국 API도 URL 직접 구성
-            request_url = f"https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList?serviceKey={ENCODING_KEY}&cityCode={city_code}&nodeId={station_id}&numOfRows=5&_type=json"
+                final_output += f"\n\n📍 {station_name} {ars_display} [전국]"
+            
+            url_nat = "https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
+            params = {
+                "serviceKey": DECODED_KEY, 
+                "cityCode": city_code, 
+                "nodeId": station_id, 
+                "numOfRows": 5, 
+                "_type": "json"
+            }
             try:
-                response = requests.get(request_url, timeout=5)
+                response = requests.get(url_nat, params=params, timeout=5)
                 data = response.json()
                 items = data['response']['body']['items']['item']
                 if isinstance(items, dict): items = [items]
@@ -217,7 +242,6 @@ def get_bus_arrival(keyword: str) -> str:
             except:
                 if "도착 예정 버스" not in final_output:
                     final_output += "\n   💤 도착 예정 버스 없음"
-            final_output += "\n"
             
     return final_output
 
