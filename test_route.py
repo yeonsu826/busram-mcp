@@ -49,5 +49,5 @@ def test_remote_server(keyword: str) -> None:
 
 if __name__ == "__main__":
     # 버스가 24시간 많은 곳으로 테스트 (방향 기능 확인용)
-    test_remote_server("서울역") 
+    test_remote_server("하림각") 
     
