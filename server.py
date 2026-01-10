@@ -1,5 +1,5 @@
 # =================================================================
-# BusRam MCP Server (Final: Seoul stId + Raw Key)
+# BusRam MCP Server (Updated: Direction Analysis & Bearing)
 # =================================================================
 import uvicorn
 import requests
@@ -7,6 +7,7 @@ import pandas as pd
 import os
 import json
 import re
+import math  # [추가] 수학 계산용
 from starlette.applications import Starlette
 from starlette.routing import Route
 from starlette.responses import JSONResponse
@@ -28,16 +29,35 @@ try:
     df_stations['도시코드'] = df_stations['도시코드'].astype(str)
     df_stations['정류장번호'] = df_stations['정류장번호'].astype(str)
     
-    print(f"✅ [System] 데이터 로드 완료! 총 {len(df_stations)}개 정류장 대기 중.")
+    # 🟢 [추가] 빠른 검색을 위해 '숫자만 남긴 ID' 컬럼(clean_id)을 미리 생성 (인덱싱)
+    df_stations['clean_id'] = df_stations['정류장번호'].apply(lambda x: re.sub(r'[^0-9]', '', x))
+    
+    print(f"✅ [System] 데이터 로드 완료! 총 {len(df_stations)}개 정류장 분석 준비 끝.")
 
 except Exception as e:
     print(f"❌ [Critical] CSV 파일 로드 실패: {e}")
     df_stations = pd.DataFrame()
 
 
-# 2. 도구(Tool) 함수 정의
+# 2. [추가] 분석용 도구 함수 (방위각 계산)
+def calculate_bearing(lat1, lon1, lat2, lon2):
+    """두 좌표 사이의 방위각(0~360도)을 계산"""
+    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
+    d_lon = lon2 - lon1
+    y = math.sin(d_lon) * math.cos(lat2)
+    x = math.cos(lat1) * math.sin(lat2) - (math.sin(lat1) * math.cos(lat2) * math.cos(d_lon))
+    initial_bearing = math.atan2(y, x)
+    return (math.degrees(initial_bearing) + 360) % 360
+
+def get_cardinal_direction(bearing):
+    """방위각을 8방위 텍스트(N, NE, E...)로 변환"""
+    directions = ['북(N)', '북동(NE)', '동(E)', '남동(SE)', '남(S)', '남서(SW)', '서(W)', '북서(NW)']
+    return directions[round(bearing / 45) % 8]
+
+
+# 3. 메인 도구(Tool) 함수
 def get_bus_arrival(keyword: str) -> str:
-    print(f"[Tool] '{keyword}' 검색 시작")
+    print(f"[Tool] '{keyword}' 검색 및 분석 시작")
     
     if df_stations.empty: return "❌ 서버 에러: CSV 파일 로드 실패"
 
@@ -47,10 +67,8 @@ def get_bus_arrival(keyword: str) -> str:
     if results.empty: return f"❌ '{keyword}' 검색 결과가 없습니다."
     
     targets = results.head(4)
-    final_output = f"🚏 '{keyword}' 도착 정보:\n"
+    final_output = f"🚏 '{keyword}' 분석 리포트:\n"
     
-    # 🟢 [변경] 서울 API 주소를 'arrive'(버스도착정보) 서비스로 변경
-    # 아까 브라우저에서 성공했던 그 주소입니다!
     url_seoul = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId"
     url_gyeonggi = "http://apis.data.go.kr/6410000/busarrivalservice/getBusArrivalList"
     url_national = "https://apis.data.go.kr/1613000/ArvlInfoInqireService/getSttnAcctoArvlPrearngeInfoList"
@@ -59,8 +77,9 @@ def get_bus_arrival(keyword: str) -> str:
         station_name = row['정류장명']
         city_code = row['도시코드']
         raw_id = row['정류장번호'] 
+        current_lat = row['위도']  # [추가] 현재 정류장 좌표
+        current_lng = row['경도']
         
-        # ARS 번호는 화면 표시용으로만 사용
         ars_raw = row.get('모바일단축번호', '')
         ars_display = ""
         try:
@@ -71,17 +90,13 @@ def get_bus_arrival(keyword: str) -> str:
         station_id = re.sub(r'[^0-9]', '', raw_id) 
         
         # ---------------------------------------------------------
-        # [Case 1] 서울 (stId 방식 + 키 직접 주입)
+        # [Case 1] 서울 (방향 분석 추가됨)
         # ---------------------------------------------------------
         if city_code == '11':
             final_output += f"\n📍 {station_name} {ars_display} [서울]\n"
             
-            # 🟢 [핵심] 키를 URL에 직접 붙이고, stId를 사용합니다.
             request_url = f"{url_seoul}?serviceKey={ENCODING_KEY}"
-            params = {
-                "stId": station_id,  # CSV의 '정류장번호' (9자리) 사용
-                "resultType": "json"
-            }
+            params = {"stId": station_id, "resultType": "json"}
             
             try:
                 response = requests.get(request_url, params=params, timeout=5)
@@ -100,17 +115,32 @@ def get_bus_arrival(keyword: str) -> str:
                 if isinstance(items, dict): items = [items]
                 
                 for bus in items:
-                    rt_nm = bus.get('rtNm')      
-                    msg1 = bus.get('arrmsg1')    
-                    msg2 = bus.get('arrmsg2')
-                    now_station = bus.get('stationNm1') # 현재 버스가 있는 정류장명
+                    rt_nm = bus.get('rtNm')       # 버스 번호
+                    msg1 = bus.get('arrmsg1')     # 첫 번째 도착 예정
+                    adirection = bus.get('adirection', '') # [추가] 방면 텍스트 (API 제공)
+                    nxt_st_id = bus.get('nxtStnId', '')    # [추가] 다음 정류장 ID (API 제공)
                     
+                    # --- [분석 로직] 다음 정류장 좌표 추적 및 방위각 계산 ---
+                    direction_analysis = ""
+                    if nxt_st_id:
+                        # CSV에서 다음 정류장 찾기 (Clean ID 이용)
+                        next_st_info = df_stations[df_stations['clean_id'] == str(nxt_st_id)]
+                        if not next_st_info.empty:
+                            nxt_lat = next_st_info.iloc[0]['위도']
+                            nxt_lng = next_st_info.iloc[0]['경도']
+                            
+                            # 현재 -> 다음 정류장 각도 계산
+                            bearing = calculate_bearing(current_lat, current_lng, nxt_lat, nxt_lng)
+                            cardinal = get_cardinal_direction(bearing)
+                            direction_analysis = f" 🧭{cardinal}방향"
+                    
+                    # 결과 문자열 조립
                     bus_info = f"   🚌 [{rt_nm}] {msg1}"
-                    if now_station:
-                        bus_info += f" (🚩현재: {now_station})"
-
-                    if msg2 and msg2 != "출발대기":
-                         bus_info += f"  (다음: {msg2})"
+                    
+                    # 방면 정보가 있으면 추가
+                    if adirection:
+                        bus_info += f" (👉 {adirection} 방면{direction_analysis})"
+                    
                     final_output += bus_info + "\n"
 
             except Exception as e:
@@ -121,10 +151,8 @@ def get_bus_arrival(keyword: str) -> str:
         # ---------------------------------------------------------
         elif city_code.startswith('31') or city_code == '12': 
             final_output += f"\n📍 {station_name} {ars_display} [경기]\n"
-            
             request_url = f"{url_gyeonggi}?serviceKey={ENCODING_KEY}"
             params = {"stationId": station_id}
-            
             try:
                 response = requests.get(request_url, params=params, timeout=5)
                 try: 
@@ -132,24 +160,20 @@ def get_bus_arrival(keyword: str) -> str:
                     items = data['response']['msgBody']['busArrivalList']
                     if isinstance(items, dict): items = [items]
                     if not items: raise Exception("No Bus")
-                    
                     for bus in items:
                         min_left = bus.get('predictTime1')
                         stops = bus.get('locationNo1')
                         final_output += f"   🚌 [버스] {min_left}분 후 ({stops}전)\n"
                 except: pass
             except: pass
-            
-            if "버스" not in final_output and "[경기]" in final_output:
-                 pass 
+            if "버스" not in final_output and "[경기]" in final_output: pass 
 
         # ---------------------------------------------------------
-        # [Case 3] 전국 (Fallback)
+        # [Case 3] 전국 (기존 유지)
         # ---------------------------------------------------------
         if "[서울]" not in final_output and "[경기]" not in final_output:
             if "📍" not in final_output: 
                 final_output += f"\n📍 {station_name} {ars_display} [전국]\n"
-            
             request_url = f"{url_national}?serviceKey={ENCODING_KEY}"
             params = {"cityCode": city_code, "nodeId": station_id, "numOfRows": 5, "_type": "json"}
             try:
@@ -168,8 +192,8 @@ def get_bus_arrival(keyword: str) -> str:
             
     return final_output
 
-# (Tools, Handler는 이전과 동일)
-TOOLS = [{"name": "get_bus_arrival", "description": "...", "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}, "func": get_bus_arrival}]
+# (Tools, Handler는 기존과 동일)
+TOOLS = [{"name": "get_bus_arrival", "description": "버스 도착 정보 및 방향 분석", "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}, "func": get_bus_arrival}]
 async def handle_mcp_request(request):
     try:
         body = await request.json(); method = body.get("method"); msg_id = body.get("id")
@@ -179,7 +203,6 @@ async def handle_mcp_request(request):
             params = body.get("params", {}); tool_name = params.get("name"); args = params.get("arguments", {})
             tool = next((t for t in TOOLS if t["name"] == tool_name), None)
             if tool:
-                # 동기 함수(requests)를 별도 스레드에서 실행하여 서버 블로킹 방지
                 result_text = await run_in_threadpool(tool["func"], **args)
                 return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"content": [{"type": "text", "text": result_text}], "isError": False}})
             return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": "Method not found"}})
