@@ -115,10 +115,14 @@ def get_bus_arrival(keyword: str) -> str:
                     final_output += "   💤 도착 예정 버스 없음\n"
                     continue
                 
+                # ... 기존 코드 ...
                 items = data['msgBody']['itemList']
                 if isinstance(items, dict): items = [items]
                 
                 for bus in items:
+                    # 👇 [디버깅용 로그 추가] Render 로그에서 확인하기 위함
+                    print(f"🔍 [DEBUG] 버스데이터: {bus.get('rtNm')} / 방면: {bus.get('adirection')} / 다음ID: {bus.get('nxtStnId')}")
+
                     rt_nm = bus.get('rtNm')       # 버스 번호
                     msg1 = bus.get('arrmsg1')     # 첫 번째 도착 예정
                     adirection = bus.get('adirection', '') # [추가] 방면 텍스트 (API 제공)
