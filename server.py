@@ -1,5 +1,5 @@
 # =================================================================
-# BusRam MCP Server (V12: Protocol Version Update)
+# BusRam MCP Server (V13: Debug Mode for Route Info)
 # =================================================================
 import uvicorn
 import requests
@@ -91,6 +91,11 @@ def get_bus_arrival(keyword: str) -> str:
             response = requests.get(url, params=params, timeout=5)
             data = response.json()
             
+            if 'msgHeader' in data and data['msgHeader']['headerCd'] != '0':
+                 err_msg = data['msgHeader'].get('headerMsg', '알 수 없는 오류')
+                 final_output += f"\n   ⚠️ 조회 실패: {err_msg}"
+                 continue
+
             if 'msgBody' not in data or not data['msgBody']['itemList']:
                 final_output += "\n   💤 도착 예정 버스 없음"
                 continue
@@ -109,10 +114,10 @@ def get_bus_arrival(keyword: str) -> str:
                 
                 final_output += f"\n   🚌 [{rt_nm}] {msg1}  {dir_text}"
         except Exception as e:
-            final_output += f"\n   - (조회 실패)"
+            final_output += f"\n   - (조회 실패: {str(e)})"
     return final_output
 
-# --- Tool 2: 노선 브리핑 ---
+# --- Tool 2: 노선 브리핑 (디버깅 강화) ---
 def get_bus_route_info(bus_number: str) -> str:
     print(f"[Tool 2] '{bus_number}'번 버스 검색")
     if df_routes.empty: return "❌ 노선 데이터 로드 실패"
@@ -120,39 +125,63 @@ def get_bus_route_info(bus_number: str) -> str:
     clean_no = re.sub(r'[^0-9-]', '', bus_number) 
     target_route = df_routes[df_routes['노선명'] == clean_no]
     
-    if target_route.empty: return f"❌ '{bus_number}'번 버스 데이터 없음"
+    if target_route.empty: return f"❌ '{bus_number}'번 버스는 데이터 파일에 없습니다."
     
     route_id = target_route.iloc[0]['ROUTE_ID']
+    print(f"🔍 Route ID Found: {route_id} for Bus {clean_no}")
+    
     url = "http://ws.bus.go.kr/api/rest/buspos/getBusPosByRtid"
     params = {"serviceKey": DECODED_KEY, "busRouteId": route_id, "resultType": "json"}
     
     try:
         response = requests.get(url, params=params, timeout=5)
-        data = response.json()
-        if 'msgBody' not in data or not data['msgBody']['itemList']: return f"💤 운행 중인 버스 없음"
+        
+        try: data = response.json()
+        except: return f"⚠️ API 응답 파싱 실패. 원본: {response.text[:100]}..."
+
+        # 🟢 [핵심] 에러 메시지 확인
+        if 'msgHeader' in data:
+            header_cd = data['msgHeader'].get('headerCd')
+            header_msg = data['msgHeader'].get('headerMsg')
+            if header_cd != '0':
+                return f"⚠️ API 에러 반환: [{header_cd}] {header_msg}"
+
+        if 'msgBody' not in data or not data['msgBody']['itemList']: 
+            return f"💤 현재 운행 중인 '{bus_number}'번 버스가 없습니다. (API 응답 정상)"
              
         items = data['msgBody']['itemList']
         if isinstance(items, dict): items = [items]
         
         report = f"🚍 **[{clean_no}번 버스 현황]** (총 {len(items)}대)\n"
+        report += "----------------------------------------\n"
         
         for i, bus in enumerate(items):
             sect_ord = bus.get('sectOrd', '?')
             congetion = bus.get('congetion', '0')
-            status = "🟢여유" if congetion != '3' else "🟡혼잡"
+            
+            # 혼잡도 
+            status = "🟢여유"
+            if congetion == '3': status = "🟡혼잡"
+            elif congetion == '4': status = "🔴매우혼잡"
+            elif congetion == '5': status = "⚪운행대기"
             
             st_name = f"구간({sect_ord})"
             try:
+                # 순번 매칭
                 match_row = target_route[target_route['순번'] == int(sect_ord)]
-                if not match_row.empty: st_name = match_row.iloc[0]['정류소명']
+                if not match_row.empty: 
+                    st_name = match_row.iloc[0]['정류소명']
             except: pass
 
             report += f"{i+1}. {st_name} 부근 ({status})\n"
+            
+        report += "----------------------------------------"
         return report
-    except Exception as e: return f"❌ API 조회 실패: {str(e)}"
+        
+    except Exception as e: return f"❌ 시스템 에러: {str(e)}"
 
 # -----------------------------------------------------------------
-# 🚀 통합 핸들러 (GET/POST 모두 처리)
+# 🚀 통합 핸들러
 # -----------------------------------------------------------------
 TOOLS = [
     {"name": "get_bus_arrival", "description": "특정 정류장의 버스 도착 정보를 조회합니다. (예: 서울역 버스)", "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}, "func": get_bus_arrival},
@@ -160,15 +189,9 @@ TOOLS = [
 ]
 
 async def handle_request(request):
-    # 1. GET 요청 (UptimeRobot, 브라우저 접속용) -> 헬스체크 응답
     if request.method == "GET":
-        return JSONResponse({
-            "status": "BusRam MCP Online",
-            "version": "1.0.1",
-            "description": "Bus Arrival & Route Info MCP Server"
-        })
+        return JSONResponse({"status": "BusRam MCP Online", "version": "1.0.2"})
 
-    # 2. POST 요청 (Kakao MCP 통신용)
     try:
         body = await request.json()
         method = body.get("method")
@@ -176,28 +199,15 @@ async def handle_request(request):
 
         if method == "initialize": 
             return JSONResponse({
-                "jsonrpc": "2.0", 
-                "id": msg_id, 
+                "jsonrpc": "2.0", "id": msg_id, 
                 "result": {
-                    # 🟢 [수정] 가이드 문서에서 요구하는 최신 스펙 버전으로 변경
                     "protocolVersion": "2025-03-26", 
-                    "capabilities": {
-                        "tools": {},
-                        # 🟢 [추가] 빈 객체라도 명시해주는 것이 표준 스펙 준수에 유리함
-                        "resources": {},
-                        "prompts": {}
-                    },
-                    "serverInfo": {
-                        "name": "BusRam",
-                        "version": "1.0.2" # 서버 버전도 살짝 올림
-                    }
+                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
+                    "serverInfo": {"name": "BusRam", "version": "1.0.2"}
                 }
             })
         elif method == "tools/list": 
-            return JSONResponse({
-                "jsonrpc": "2.0", "id": msg_id, 
-                "result": {"tools": [{k: v for k, v in t.items() if k != 'func'} for t in TOOLS]}
-            })
+            return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [{k: v for k, v in t.items() if k != 'func'} for t in TOOLS]}})
         elif method == "tools/call":
             params = body.get("params", {}); tool_name = params.get("name"); args = params.get("arguments", {})
             tool = next((t for t in TOOLS if t["name"] == tool_name), None)
