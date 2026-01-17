@@ -1,7 +1,7 @@
 # =================================================================
-# BusRam MCP Server (V24: Protocol Version Update for Validation)
-# - Protocol Version: 2024-11-05 -> 2025-03-26 (최신 스펙 적용)
-# - 기능은 V23과 동일 (안정성 유지)
+# BusRam MCP Server (V25: Ghost Bus Remover)
+# - 차량 번호(plainNo) 기반 중복 제거 로직 추가
+# - "곧 도착"과 "1번째 전"이 겹칠 때 실제 차량 1대만 표시
 # =================================================================
 import uvicorn
 import requests
@@ -16,7 +16,6 @@ from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
-import xml.etree.ElementTree as ET
 
 # 🔑 [키 설정]
 DECODED_KEY = "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg=="
@@ -38,7 +37,7 @@ try:
     except: df_stations = pd.read_csv(STATION_CSV, encoding='utf-8')
     df_stations['정류장명'] = df_stations['정류장명'].astype(str)
     
-    # API용 9자리 ID
+    # ID 매핑
     if '정류소ID' in df_stations.columns:
         df_stations['api_id'] = df_stations['정류소ID'].astype(str)
     elif 'NODE_ID' in df_stations.columns:
@@ -46,7 +45,6 @@ try:
     else:
         df_stations['api_id'] = df_stations['정류장번호'].astype(str).apply(lambda x: re.sub(r'[^0-9]', '', x))
 
-    # 사용자용 5자리 ARS ID
     if '모바일단축번호' in df_stations.columns:
         df_stations['ars_id'] = df_stations['모바일단축번호'].fillna(0).astype(str).apply(lambda x: x.split('.')[0].zfill(5))
     else:
@@ -92,17 +90,15 @@ def get_station_arrival(keyword: str) -> str:
         st_name = row['정류장명']
         api_st_id = row['api_id']
         user_ars_id = row['ars_id']
-        
         final_output += f"\n📍 **{st_name}** ({user_ars_id})"
         
         try:
             params = {"serviceKey": DECODED_KEY, "stId": api_st_id, "resultType": "json"}
             response = requests.get(url, params=params, timeout=5)
             
-            try:
-                data = response.json()
-            except json.JSONDecodeError:
-                final_output += f"\n   ⚠️ 서버 응답 오류"
+            try: data = response.json()
+            except: 
+                final_output += f"\n   ⚠️ 응답 오류"
                 continue
 
             if 'msgHeader' in data and data['msgHeader']['headerCd'] != '0':
@@ -118,22 +114,19 @@ def get_station_arrival(keyword: str) -> str:
                     msg1 = bus.get('arrmsg1', '')
                     adirection = bus.get('adirection', '')
                     
-                    dir_text = ""
-                    if adirection and adirection != "None": dir_text = f"👉 {adirection} 방면"
-                    else: dir_text = get_direction_from_csv(rt_nm, user_ars_id)
+                    dir_text = f"👉 {adirection} 방면" if (adirection and adirection != "None") else get_direction_from_csv(rt_nm, user_ars_id)
 
                     if msg1 != '운행종료' and msg1 != '출발대기':
                         final_output += f"\n   🚌 **{rt_nm}**: {msg1} {dir_text}"
                         count += 1
                 if count == 0: final_output += "\n   (도착 예정 버스 없음)"
             else: final_output += "\n   (도착 정보 없음)"
-        except Exception as e:
-            final_output += f"\n   ⚠️ 에러: {str(e)}"
+        except Exception as e: final_output += f"\n   ⚠️ 에러: {str(e)}"
     return final_output
 
 
 # =================================================================
-# 🛠️ Tool 2: 버스 위치 조회
+# 🛠️ Tool 2: 버스 위치 조회 (중복 제거 적용)
 # =================================================================
 def get_bus_location(bus_number: str) -> str:
     print(f"[Tool 2] '{bus_number}'번 위치")
@@ -154,73 +147,89 @@ def get_bus_location(bus_number: str) -> str:
         if isinstance(items, dict): items = [items]
         
         output = f"🚍 **[{bus_number}번 버스 위치]**\n"
-        bus_count = 0
+        
+        # 🚨 [중복 제거 로직]
+        # detected_buses: 이미 찾은 버스 번호판(plainNo) 또는 위치 인덱스를 저장
+        detected_plates = set()
+        detected_indices = set()
+        
+        real_buses = []
+
         for i, item in enumerate(items):
             msg = item.get('arrmsg1', '')
             this_st = item.get('stNm', '')
             
+            # 차량 번호판 추출 (예: 서울70사1234) - 중복 제거의 핵심 Key
+            plate_no = item.get('plainNo1', '')
+            
+            bus_info = None
+            current_idx = -1 # 버스의 현재 위치 인덱스
+
+            # 1. 위치 판별
             if '곧 도착' in msg or '[0번째 전]' in msg:
+                # 버스는 현재 정류장(i)에 있음
+                current_idx = i
                 next_st = items[i+1].get('stNm') if i+1 < len(items) else "종점"
-                output += f"\n🚌 **{bus_count+1}호차**: **{this_st}** (진입) -> {next_st}\n"
-                bus_count += 1
+                bus_info = f"📍 현재: **{this_st}** (진입) -> {next_st}"
+                
             elif '[1번째 전]' in msg:
+                # 버스는 이전 정류장(i-1)에 있음
+                current_idx = i - 1
                 prev_st = items[i-1].get('stNm') if i > 0 else "기점"
-                output += f"\n🚌 **{bus_count+1}호차**: **{prev_st}** -> {this_st} ({msg})\n"
-                bus_count += 1
-        if bus_count == 0: output += "\n운행 중인 차량 없음"
+                bus_info = f"📍 현재: **{prev_st}** -> {this_st} ({msg})"
+            
+            # 2. 중복 체크 및 등록
+            if bus_info and current_idx >= 0:
+                # (A) 번호판이 있는 경우: 확실하게 중복 제거
+                if plate_no:
+                    if plate_no not in detected_plates:
+                        detected_plates.add(plate_no)
+                        real_buses.append(bus_info)
+                        # 위치 인덱스도 등록해둠 (혹시 모를 중복 방지)
+                        detected_indices.add(current_idx)
+                
+                # (B) 번호판이 없는 경우: 위치 기반 제거 (Echo 방지)
+                else:
+                    # 만약 바로 앞 위치(current_idx)에 이미 버스가 등록됐다면, 이건 '메아리'임 -> 무시
+                    if current_idx not in detected_indices:
+                        detected_indices.add(current_idx)
+                        real_buses.append(bus_info)
+
+        # 3. 결과 출력
+        for idx, info in enumerate(real_buses):
+            output += f"\n🚌 **{idx+1}호차**: {info}\n"
+            
+        if not real_buses: output += "\n운행 중인 차량 없음"
         return output
+        
     except Exception as e: return f"❌ 에러: {e}"
 
 
 # -----------------------------------------------------------------
-# 🚀 핸들러 (최신 스펙 2025-03-26 적용)
+# 🚀 핸들러 (2025-03-26 스펙 유지)
 # -----------------------------------------------------------------
 TOOLS = [
-    {
-        "name": "get_station_arrival", 
-        "description": "정류장 이름(예: 하림각) 또는 ARS-ID(예: 01136)를 입력하여 버스 도착 정보를 조회합니다.", 
-        "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}, 
-        "func": get_station_arrival
-    },
-    {
-        "name": "get_bus_location", 
-        "description": "버스 번호를 입력받아 현재 버스의 위치를 조회합니다.", 
-        "inputSchema": {"type": "object", "properties": {"bus_number": {"type": "string"}}, "required": ["bus_number"]}, 
-        "func": get_bus_location
-    }
+    {"name": "get_station_arrival", "description": "정류장 이름/번호로 도착 정보 조회", "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}, "func": get_station_arrival},
+    {"name": "get_bus_location", "description": "버스 번호로 현재 위치 조회", "inputSchema": {"type": "object", "properties": {"bus_number": {"type": "string"}}, "required": ["bus_number"]}, "func": get_bus_location}
 ]
 
 async def handle_request(request):
-    if request.method == "GET" or request.method == "HEAD":
-        return JSONResponse({"status": "BusRam V24 Online"})
-    
+    if request.method == "GET" or request.method == "HEAD": return JSONResponse({"status": "BusRam V25 Online"})
     try:
         body = await request.json()
         msg_id = body.get("id")
-        method = body.get("method")
-
-        if method == "initialize": 
+        if body.get("method") == "initialize": 
             return JSONResponse({
-                "jsonrpc": "2.0", 
-                "id": msg_id, 
+                "jsonrpc": "2.0", "id": msg_id, 
                 "result": {
-                    # 🚨 여기가 핵심! 반려 원인 해결
                     "protocolVersion": "2025-03-26", 
-                    "capabilities": {
-                        "tools": {},
-                        "resources": {},
-                        "prompts": {},
-                        "logging": {} 
-                    },
-                    "serverInfo": {
-                        "name": "BusRam", 
-                        "version": "1.2.1"
-                    }
+                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}, "logging": {}},
+                    "serverInfo": {"name": "BusRam", "version": "1.2.2"}
                 }
             })
-        elif method == "tools/list": 
+        elif body.get("method") == "tools/list": 
             return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [{k: v for k, v in t.items() if k != 'func'} for t in TOOLS]}})
-        elif method == "tools/call":
+        elif body.get("method") == "tools/call":
             tool = next((t for t in TOOLS if t["name"] == body["params"]["name"]), None)
             if tool:
                 res = await run_in_threadpool(tool["func"], **body["params"]["arguments"])
