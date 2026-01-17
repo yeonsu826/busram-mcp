@@ -1,13 +1,12 @@
 # =================================================================
-# BusRam MCP Server (V13: Debug Mode for Route Info)
+# BusRam MCP Server (V16: Village Bus Fix - General API)
 # =================================================================
 import uvicorn
 import requests
 import pandas as pd
 import os
-import json
 import re
-import math
+import json
 from urllib.parse import unquote
 from starlette.applications import Starlette
 from starlette.routing import Route
@@ -16,215 +15,118 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
-# 1. 설정
-ENCODING_KEY = os.environ.get("ENCODING_KEY", "ezGwhdiNnVtd%2BHvkfiKgr%2FZ4r%2BgvfeUIRz%2FdVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI%2B%2FpJFoYr9Ce%2BTDg%3D%3D")
-DECODED_KEY = unquote(ENCODING_KEY)
+# 🔑 [키 설정]
+DECODED_KEY = "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg=="
 
-print("📂 [System] 데이터 로딩 시작...")
+print("📂 [System] 정류장 데이터 로딩 중...")
 STATION_CSV = "station_data.csv"
-ROUTE_CSV = "route_data.csv"
 
-# [1] 정류장 로드
 try:
     try: df_stations = pd.read_csv(STATION_CSV, encoding='cp949')
     except: df_stations = pd.read_csv(STATION_CSV, encoding='utf-8')
     df_stations['정류장명'] = df_stations['정류장명'].astype(str)
     df_stations['clean_id'] = df_stations['정류장번호'].astype(str).apply(lambda x: re.sub(r'[^0-9]', '', x))
-    print(f"✅ [Stations] 정류장 로드 완료.")
-except: df_stations = pd.DataFrame()
+    print(f"✅ 정류장 데이터 로드 완료: {len(df_stations)}개")
+except Exception as e:
+    print(f"❌ 데이터 로드 실패: {e}")
+    df_stations = pd.DataFrame()
 
-# [2] 노선 로드
-try:
-    df_routes = pd.read_csv(ROUTE_CSV, encoding='utf-8')
-    df_routes['노선명'] = df_routes['노선명'].astype(str)
-    df_routes['ROUTE_ID'] = df_routes['ROUTE_ID'].astype(str)
-    df_routes['ARS_ID'] = df_routes['ARS_ID'].astype(str).apply(lambda x: x.split('.')[0].zfill(5))
-    df_routes['순번'] = pd.to_numeric(df_routes['순번'], errors='coerce').fillna(0).astype(int)
-    print(f"✅ [Routes] 노선 로드 완료.")
-except: df_routes = pd.DataFrame()
-
-# --- 분석 함수 ---
-def calculate_bearing(lat1, lon1, lat2, lon2):
-    lat1, lon1, lat2, lon2 = map(math.radians, [lat1, lon1, lat2, lon2])
-    d_lon = lon2 - lon1
-    y = math.sin(d_lon) * math.cos(lat2)
-    x = math.cos(lat1) * math.sin(lat2) - (math.sin(lat1) * math.cos(lat2) * math.cos(d_lon))
-    return (math.degrees(math.atan2(y, x)) + 360) % 360
-
-def get_cardinal_direction(bearing):
-    return ['북(N)', '북동(NE)', '동(E)', '남동(SE)', '남(S)', '남서(SW)', '서(W)', '북서(NW)'][round(bearing / 45) % 8]
-
-def get_direction_from_csv(bus_no, current_ars_id):
-    if df_routes.empty: return ""
-    route_path = df_routes[df_routes['노선명'] == bus_no].sort_values('순번')
-    if route_path.empty: return ""
-    current_node = route_path[route_path['ARS_ID'] == current_ars_id]
-    if current_node.empty: return ""
-    current_seq = current_node.iloc[0]['순번']
-    next_node = route_path[route_path['순번'] == current_seq + 1]
-    if not next_node.empty:
-        return f"👉 {next_node.iloc[0]['정류소명']}방향 ({route_path.iloc[-1]['정류소명']}행)"
-    return "🏁 종점 부근"
-
-# --- Tool 1: 정류장 도착 정보 ---
+# --- Tool 1: 통합 버스 도착 정보 (마을버스 지원 강화) ---
 def get_bus_arrival(keyword: str) -> str:
-    print(f"[Tool 1] '{keyword}' 정류장 검색")
-    if df_stations.empty: return "❌ 데이터 로드 실패"
-    mask = df_stations['정류장명'].str.contains(keyword)
-    results = df_stations[mask].head(4)
-    if results.empty: return f"❌ '{keyword}' 정류장을 찾을 수 없습니다."
+    print(f"[검색 요청] '{keyword}'")
     
-    final_output = f"🚏 '{keyword}' 정류장 도착 정보:\n"
-    url = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId"
+    if df_stations.empty: return "❌ 서버 오류: 데이터 파일 없음"
+
+    mask = df_stations['정류장명'].str.contains(keyword)
+    results = df_stations[mask].head(5)
+    
+    if results.empty: return f"❌ '{keyword}' 검색 결과가 없습니다."
+    
+    final_output = f"🚏 **'{keyword}' 검색 결과**\n"
+    
+    # 🚨 [핵심 수정] 저상버스 API(getLow...) -> 일반 도착정보 API(getArr...)로 변경
+    # 이 API가 마을버스 데이터를 훨씬 잘 가져옵니다.
+    url = "http://ws.bus.go.kr/api/rest/arrive/getArrInfoByUid"
     
     for _, row in results.iterrows():
         st_name = row['정류장명']
         raw_id = row['정류장번호']
-        st_id = re.sub(r'[^0-9]', '', str(raw_id))
-        ars_raw = row.get('모바일단축번호', '')
-        clean_ars = str(int(float(ars_raw))).zfill(5) if pd.notnull(ars_raw) and str(ars_raw).strip() else ""
+        st_id = re.sub(r'[^0-9]', '', str(raw_id)) # 정류장 고유 ID (9자리)
         
-        final_output += f"\n📍 {st_name} (ARS: {clean_ars}) [서울]"
+        # ARS ID (5자리 표기용)
+        ars_display = row.get('모바일단축번호', '')
+        if pd.isna(ars_display) or not str(ars_display).strip(): 
+            ars_display = "(ID없음)"
+        else:
+            ars_display = str(int(float(ars_display))).zfill(5)
+
+        final_output += f"\n📍 **{st_name}** ({ars_display})"
         
         try:
+            # stId: 정류소 고유 ID (필수)
             params = {"serviceKey": DECODED_KEY, "stId": st_id, "resultType": "json"}
             response = requests.get(url, params=params, timeout=5)
             data = response.json()
             
-            if 'msgHeader' in data and data['msgHeader']['headerCd'] != '0':
-                 err_msg = data['msgHeader'].get('headerMsg', '알 수 없는 오류')
-                 final_output += f"\n   ⚠️ 조회 실패: {err_msg}"
-                 continue
+            if 'msgBody' in data and data['msgBody']['itemList']:
+                items = data['msgBody']['itemList']
+                if isinstance(items, dict): items = [items]
+                
+                # 도착 정보 파싱
+                count = 0
+                for bus in items:
+                    rt_nm = bus.get('rtNm', '?')
+                    msg1 = bus.get('arrmsg1', '정보없음')
+                    
+                    # 도착 정보가 있는 버스만 표시
+                    if msg1 != '운행종료' and msg1 != '출발대기':
+                        final_output += f"\n   🚌 **{rt_nm}**: {msg1}"
+                        count += 1
+                
+                if count == 0: final_output += "\n   (운행 종료 또는 도착 정보 없음)"
 
-            if 'msgBody' not in data or not data['msgBody']['itemList']:
-                final_output += "\n   💤 도착 예정 버스 없음"
-                continue
+            else:
+                # API는 성공했으나(200 OK), 데이터 리스트가 비어있는 경우
+                final_output += "\n   (도착 예정 버스 없음)"
                 
-            items = data['msgBody']['itemList']
-            if isinstance(items, dict): items = [items]
-            
-            for bus in items:
-                rt_nm = bus.get('rtNm')
-                msg1 = bus.get('arrmsg1')
-                adirection = bus.get('adirection', '')
-                
-                dir_text = ""
-                if adirection and adirection != "None": dir_text = f"👉 {adirection} 방면"
-                else: dir_text = get_direction_from_csv(rt_nm, clean_ars)
-                
-                final_output += f"\n   🚌 [{rt_nm}] {msg1}  {dir_text}"
         except Exception as e:
-            final_output += f"\n   - (조회 실패: {str(e)})"
+            final_output += f"\n   ⚠️ 조회 에러 ({str(e)})"
+            
     return final_output
 
-# --- Tool 2: 노선 브리핑 (디버깅 강화) ---
-def get_bus_route_info(bus_number: str) -> str:
-    print(f"[Tool 2] '{bus_number}'번 버스 검색")
-    if df_routes.empty: return "❌ 노선 데이터 로드 실패"
-    
-    clean_no = re.sub(r'[^0-9-]', '', bus_number) 
-    target_route = df_routes[df_routes['노선명'] == clean_no]
-    
-    if target_route.empty: return f"❌ '{bus_number}'번 버스는 데이터 파일에 없습니다."
-    
-    route_id = target_route.iloc[0]['ROUTE_ID']
-    print(f"🔍 Route ID Found: {route_id} for Bus {clean_no}")
-    
-    url = "http://ws.bus.go.kr/api/rest/buspos/getBusPosByRtid"
-    params = {"serviceKey": DECODED_KEY, "busRouteId": route_id, "resultType": "json"}
-    
-    try:
-        response = requests.get(url, params=params, timeout=5)
-        
-        try: data = response.json()
-        except: return f"⚠️ API 응답 파싱 실패. 원본: {response.text[:100]}..."
-
-        # 🟢 [핵심] 에러 메시지 확인
-        if 'msgHeader' in data:
-            header_cd = data['msgHeader'].get('headerCd')
-            header_msg = data['msgHeader'].get('headerMsg')
-            if header_cd != '0':
-                return f"⚠️ API 에러 반환: [{header_cd}] {header_msg}"
-
-        if 'msgBody' not in data or not data['msgBody']['itemList']: 
-            return f"💤 현재 운행 중인 '{bus_number}'번 버스가 없습니다. (API 응답 정상)"
-             
-        items = data['msgBody']['itemList']
-        if isinstance(items, dict): items = [items]
-        
-        report = f"🚍 **[{clean_no}번 버스 현황]** (총 {len(items)}대)\n"
-        report += "----------------------------------------\n"
-        
-        for i, bus in enumerate(items):
-            sect_ord = bus.get('sectOrd', '?')
-            congetion = bus.get('congetion', '0')
-            
-            # 혼잡도 
-            status = "🟢여유"
-            if congetion == '3': status = "🟡혼잡"
-            elif congetion == '4': status = "🔴매우혼잡"
-            elif congetion == '5': status = "⚪운행대기"
-            
-            st_name = f"구간({sect_ord})"
-            try:
-                # 순번 매칭
-                match_row = target_route[target_route['순번'] == int(sect_ord)]
-                if not match_row.empty: 
-                    st_name = match_row.iloc[0]['정류소명']
-            except: pass
-
-            report += f"{i+1}. {st_name} 부근 ({status})\n"
-            
-        report += "----------------------------------------"
-        return report
-        
-    except Exception as e: return f"❌ 시스템 에러: {str(e)}"
-
 # -----------------------------------------------------------------
-# 🚀 통합 핸들러
+# 🚀 핸들러
 # -----------------------------------------------------------------
 TOOLS = [
-    {"name": "get_bus_arrival", "description": "특정 정류장의 버스 도착 정보를 조회합니다. (예: 서울역 버스)", "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}, "func": get_bus_arrival},
-    {"name": "get_bus_route_info", "description": "특정 버스 노선의 현재 위치와 운행 대수를 조회합니다. (예: 7016번 버스 위치)", "inputSchema": {"type": "object", "properties": {"bus_number": {"type": "string"}}, "required": ["bus_number"]}, "func": get_bus_route_info}
+    {
+        "name": "get_bus_arrival", 
+        "description": "정류장 이름을 입력받아 시내버스와 마을버스의 실시간 도착 정보를 조회합니다.", 
+        "inputSchema": {
+            "type": "object", 
+            "properties": {"keyword": {"type": "string", "description": "정류장 이름 (예: 하림각, 서울역)"}}, 
+            "required": ["keyword"]
+        }, 
+        "func": get_bus_arrival
+    }
 ]
 
 async def handle_request(request):
-    if request.method == "GET":
-        return JSONResponse({"status": "BusRam MCP Online", "version": "1.0.2"})
-
+    if request.method == "GET": return JSONResponse({"status": "BusRam V16 Online"})
     try:
         body = await request.json()
-        method = body.get("method")
-        msg_id = body.get("id")
-
-        if method == "initialize": 
-            return JSONResponse({
-                "jsonrpc": "2.0", "id": msg_id, 
-                "result": {
-                    "protocolVersion": "2025-03-26", 
-                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}},
-                    "serverInfo": {"name": "BusRam", "version": "1.0.2"}
-                }
-            })
-        elif method == "tools/list": 
-            return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [{k: v for k, v in t.items() if k != 'func'} for t in TOOLS]}})
-        elif method == "tools/call":
-            params = body.get("params", {}); tool_name = params.get("name"); args = params.get("arguments", {})
-            tool = next((t for t in TOOLS if t["name"] == tool_name), None)
+        if body.get("method") == "initialize": 
+            return JSONResponse({"jsonrpc": "2.0", "id": body.get("id"), "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "BusRam", "version": "1.0.6"}}})
+        elif body.get("method") == "tools/list": 
+            return JSONResponse({"jsonrpc": "2.0", "id": body.get("id"), "result": {"tools": [{k: v for k, v in t.items() if k != 'func'} for t in TOOLS]}})
+        elif body.get("method") == "tools/call":
+            tool = next((t for t in TOOLS if t["name"] == body["params"]["name"]), None)
             if tool:
-                result_text = await run_in_threadpool(tool["func"], **args)
-                return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"content": [{"type": "text", "text": result_text}], "isError": False}})
-            return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "error": {"code": -32601, "message": "Method not found"}})
-        
-        return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {}})
-    except Exception as e: 
-        return JSONResponse({"error": str(e)}, status_code=500)
+                res = await run_in_threadpool(tool["func"], **body["params"]["arguments"])
+                return JSONResponse({"jsonrpc": "2.0", "id": body.get("id"), "result": {"content": [{"type": "text", "text": res}]}})
+    except: pass
+    return JSONResponse({"error": "Error"}, status_code=500)
 
-app = Starlette(debug=True, routes=[
-    Route("/", endpoint=handle_request, methods=["POST", "GET"]),
-    Route("/mcp", endpoint=handle_request, methods=["POST", "GET"])
-], middleware=[Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])])
+app = Starlette(debug=True, routes=[Route("/", endpoint=handle_request, methods=["POST", "GET"]), Route("/mcp", endpoint=handle_request, methods=["POST", "GET"])], middleware=[Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])])
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
