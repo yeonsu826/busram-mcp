@@ -52,8 +52,8 @@ if __name__ == "__main__":
     # --- 테스트 시나리오 ---
 
     # 1. 정류장 도착 정보 조회 (기존 기능)
-    # test_tool("get_bus_arrival", {"keyword": "하림각"})
+    test_tool("get_bus_arrival", {"keyword": "하림각"})
 
     # 2. [NEW] 버스 노선 전체 위치 조회 (새 기능)
     #    -> 7016번 버스가 지금 어디어디에 있는지 브리핑
-    test_tool("get_bus_route_info", {"bus_number": "7016"})
+    #test_tool("get_bus_route_info", {"bus_number": "7016"})
