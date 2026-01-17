@@ -1,7 +1,6 @@
 # =================================================================
-# BusRam MCP Server (V19: Final Stable - Strict Doc Compliance)
-# Tool 1: getLowArrInfoByStId (문서 3번 API 사용) - 에러 해결 우선
-# Tool 2: getArrInfoByRouteAll (문서 1번 API 사용) - 완벽 작동 중
+# BusRam MCP Server (V20: Direction Fix)
+# - 정류장 ARS-ID(5자리) 매핑 로직 수정으로 방향 표시 버그 해결
 # =================================================================
 import uvicorn
 import requests
@@ -24,12 +23,13 @@ print("📂 [System] 데이터 로딩 중...")
 STATION_CSV = "station_data.csv"
 ROUTE_CSV = "route_data.csv"
 
-# [1] 데이터 로드 (ID 컬럼 자동 탐지)
+# [1] 데이터 로드
 try:
     df_routes = pd.read_csv(ROUTE_CSV, encoding='utf-8')
     df_routes['노선명'] = df_routes['노선명'].astype(str)
     df_routes['ROUTE_ID'] = df_routes['ROUTE_ID'].astype(str)
     df_routes['순번'] = pd.to_numeric(df_routes['순번'], errors='coerce').fillna(0).astype(int)
+    # ARS_ID 5자리 문자열로 통일 (매칭 핵심)
     df_routes['ARS_ID'] = df_routes['ARS_ID'].astype(str).apply(lambda x: x.split('.')[0].zfill(5))
 except: df_routes = pd.DataFrame()
 
@@ -38,39 +38,52 @@ try:
     except: df_stations = pd.read_csv(STATION_CSV, encoding='utf-8')
     df_stations['정류장명'] = df_stations['정류장명'].astype(str)
     
-    # [중요] 9자리 정류소 ID 찾기 (API 필수값)
-    # CSV에 '정류소ID', 'NODE_ID' 등이 있으면 그걸 쓰고, 없으면 '정류장번호' 사용
+    # [API ID] 9자리 숫자 (요청용)
     if '정류소ID' in df_stations.columns:
         df_stations['api_id'] = df_stations['정류소ID'].astype(str)
-    elif 'NODE_ID' in df_stations.columns:
-        df_stations['api_id'] = df_stations['NODE_ID'].astype(str)
     else:
-        # 숫자만 남겨서 ID로 사용
+        # SEB100... -> 100... (숫자만 추출)
         df_stations['api_id'] = df_stations['정류장번호'].astype(str).apply(lambda x: re.sub(r'[^0-9]', '', x))
         
-    # ARS ID (보여주기용 5자리)
-    df_stations['disp_id'] = df_stations['정류장번호'].astype(str)
-    
+    # [ARS ID] 5자리 숫자 (방향 찾기 & 표시용) - ⭐ 핵심 수정 ⭐
+    # '모바일단축번호' 컬럼이 진짜 ARS-ID입니다.
+    if '모바일단축번호' in df_stations.columns:
+        df_stations['ars_id'] = df_stations['모바일단축번호'].fillna(0).astype(str).apply(lambda x: x.split('.')[0].zfill(5))
+    else:
+        # 없으면 정류장번호에서 추출 시도
+        df_stations['ars_id'] = df_stations['정류장번호'].astype(str).apply(lambda x: re.sub(r'[^0-9]', '', x)[-5:].zfill(5))
+        
 except: df_stations = pd.DataFrame()
 
 
 # --- [Helper] 방향 찾기 함수 ---
 def get_direction_from_csv(bus_no, current_ars_id):
     if df_routes.empty: return ""
+    
+    # 1. 해당 노선 경로 가져오기
     route_path = df_routes[df_routes['노선명'] == bus_no].sort_values('순번')
     if route_path.empty: return ""
+    
+    # 2. 현재 정류장(ARS ID) 찾기
     current_node = route_path[route_path['ARS_ID'] == current_ars_id]
-    if current_node.empty: return ""
+    if current_node.empty: 
+        # ARS ID가 안 맞으면 정류장 이름으로 2차 시도 (안전장치)
+        # (이 부분은 생략 가능하지만 정확도를 위해 추가할 수 있음)
+        return ""
+    
+    # 3. 다음 정류장 확인
     current_seq = current_node.iloc[0]['순번']
     next_node = route_path[route_path['순번'] == current_seq + 1]
+    
     if not next_node.empty:
+        # "다음 정류장" 이름으로 방향 표시
         return f"👉 {next_node.iloc[0]['정류소명']}방향"
+    
     return "🏁 종점행"
 
 
 # =================================================================
-# 🛠️ 도구 1: 정류장 도착 정보 (문서 3번 API 복귀)
-# API: getLowArrInfoByStId (저상버스 조회지만 일반 버스도 일부 나옴)
+# 🛠️ 도구 1: 정류장 도착 정보
 # =================================================================
 def get_station_arrival(keyword: str) -> str:
     print(f"[Tool 1] '{keyword}' 검색")
@@ -81,26 +94,23 @@ def get_station_arrival(keyword: str) -> str:
     if results.empty: return f"❌ '{keyword}' 검색 결과가 없습니다."
     
     final_output = f"🚏 **'{keyword}' 도착 정보**\n"
-    
-    # 🚨 [수정] 사용 가능한 유일한 정류장 API (문서 3번)
     url = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId"
     
     for _, row in results.iterrows():
         st_name = row['정류장명']
-        st_id = row['api_id']  # 9자리 ID (필수)
-        disp_id = row['disp_id'] # 보여주기용
+        st_id = row['api_id']  # 9자리 (API용)
+        ars_id = row['ars_id'] # 5자리 (방향찾기용)
 
-        final_output += f"\n📍 **{st_name}** ({disp_id})"
+        # 보여줄 때도 깔끔하게 5자리로 (예: 01136)
+        final_output += f"\n📍 **{st_name}** ({ars_id})"
         
         try:
             params = {"serviceKey": DECODED_KEY, "stId": st_id, "resultType": "json"}
             response = requests.get(url, params=params, timeout=5)
             data = response.json()
             
-            # 에러 메시지가 있는지 확인 (디버깅용)
             if 'msgHeader' in data and data['msgHeader']['headerCd'] != '0':
-                err_msg = data['msgHeader']['headerMsg']
-                final_output += f"\n   ⚠️ API 에러: {err_msg}"
+                final_output += f"\n   ⚠️ (데이터 없음)"
                 continue
 
             if 'msgBody' in data and data['msgBody']['itemList']:
@@ -112,15 +122,15 @@ def get_station_arrival(keyword: str) -> str:
                     rt_nm = bus.get('rtNm', '?')
                     msg1 = bus.get('arrmsg1', '정보없음')
                     
-                    # 방향 찾기 (API가 안 주면 CSV에서)
+                    # 1차 시도: API가 주는 방향 정보
                     adirection = bus.get('adirection', '')
                     dir_text = ""
-                    if adirection and adirection != "None": dir_text = f"👉 {adirection} 방면"
+                    
+                    if adirection and adirection != "None": 
+                        dir_text = f"👉 {adirection} 방면"
                     else: 
-                        # ARS ID 5자리 추출 시도
-                        clean_ars = re.sub(r'[^0-9]', '', str(disp_id))
-                        if len(clean_ars) > 5: clean_ars = clean_ars[-5:] # 뒤 5자리
-                        dir_text = get_direction_from_csv(rt_nm, clean_ars)
+                        # 2차 시도: CSV에서 찾기 (이제 ARS ID가 맞으므로 잘 찾아질 것임)
+                        dir_text = get_direction_from_csv(rt_nm, ars_id)
 
                     if msg1 != '운행종료' and msg1 != '출발대기':
                         final_output += f"\n   🚌 **{rt_nm}**: {msg1} {dir_text}"
@@ -131,24 +141,21 @@ def get_station_arrival(keyword: str) -> str:
                 final_output += "\n   (도착 정보 없음)"
                 
         except Exception as e:
-            # 🚨 에러가 나면 정확한 이유를 출력하도록 수정
-            final_output += f"\n   ⚠️ 시스템 에러: {str(e)}"
+            final_output += f"\n   ⚠️ 에러: {str(e)}"
             
     return final_output
 
 
 # =================================================================
-# 🛠️ 도구 2: 버스 위치 조회 (성공한 V18 버전 유지)
+# 🛠️ 도구 2: 버스 위치 조회 (유지)
 # =================================================================
 def get_bus_location(bus_number: str) -> str:
     print(f"[Tool 2] '{bus_number}'번 버스 위치 요약")
-    
     if df_routes.empty: return "❌ 노선 데이터 없음"
     target_row = df_routes[df_routes['노선명'] == bus_number]
     if target_row.empty: return f"❌ '{bus_number}'번 버스를 찾을 수 없습니다."
     
     route_id = target_row.iloc[0]['ROUTE_ID']
-    # 🚨 [성공 비결] 문서 1번 API (getArrInfoByRouteAll)
     url = "http://ws.bus.go.kr/api/rest/arrive/getArrInfoByRouteAll"
     params = {"serviceKey": DECODED_KEY, "busRouteId": route_id, "resultType": "json"}
     
@@ -201,12 +208,13 @@ TOOLS = [
 ]
 
 async def handle_request(request):
-    if request.method == "GET": return JSONResponse({"status": "BusRam V19 Online"})
+    if request.method == "GET" or request.method == "HEAD":
+        return JSONResponse({"status": "BusRam V20 Online"})
     try:
         body = await request.json()
         msg_id = body.get("id")
         if body.get("method") == "initialize": 
-            return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "BusRam", "version": "1.1.1"}}})
+            return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"protocolVersion": "2024-11-05", "capabilities": {}, "serverInfo": {"name": "BusRam", "version": "1.1.2"}}})
         elif body.get("method") == "tools/list": 
             return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [{k: v for k, v in t.items() if k != 'func'} for t in TOOLS]}})
         elif body.get("method") == "tools/call":
