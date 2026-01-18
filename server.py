@@ -1,7 +1,7 @@
 # =================================================================
-# BusRam MCP Server (V24: Protocol Version Update for Validation)
-# - Protocol Version: 2024-11-05 -> 2025-03-26 (최신 스펙 적용)
-# - 기능은 V23과 동일 (안정성 유지)
+# BusRam MCP Server (V27: User-Friendly Location Display)
+# - 직관적인 표현으로 변경: "현재 위치", "다음 정류장" 명시
+# - "[1번째 전]" 등 내부 용어 삭제하고 친절한 문구로 대체
 # =================================================================
 import uvicorn
 import requests
@@ -16,7 +16,6 @@ from starlette.responses import JSONResponse
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
-import xml.etree.ElementTree as ET
 
 # 🔑 [키 설정]
 DECODED_KEY = "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg=="
@@ -38,7 +37,6 @@ try:
     except: df_stations = pd.read_csv(STATION_CSV, encoding='utf-8')
     df_stations['정류장명'] = df_stations['정류장명'].astype(str)
     
-    # API용 9자리 ID
     if '정류소ID' in df_stations.columns:
         df_stations['api_id'] = df_stations['정류소ID'].astype(str)
     elif 'NODE_ID' in df_stations.columns:
@@ -46,7 +44,6 @@ try:
     else:
         df_stations['api_id'] = df_stations['정류장번호'].astype(str).apply(lambda x: re.sub(r'[^0-9]', '', x))
 
-    # 사용자용 5자리 ARS ID
     if '모바일단축번호' in df_stations.columns:
         df_stations['ars_id'] = df_stations['모바일단축번호'].fillna(0).astype(str).apply(lambda x: x.split('.')[0].zfill(5))
     else:
@@ -92,17 +89,15 @@ def get_station_arrival(keyword: str) -> str:
         st_name = row['정류장명']
         api_st_id = row['api_id']
         user_ars_id = row['ars_id']
-        
         final_output += f"\n📍 **{st_name}** ({user_ars_id})"
         
         try:
             params = {"serviceKey": DECODED_KEY, "stId": api_st_id, "resultType": "json"}
             response = requests.get(url, params=params, timeout=5)
             
-            try:
-                data = response.json()
-            except json.JSONDecodeError:
-                final_output += f"\n   ⚠️ 서버 응답 오류"
+            try: data = response.json()
+            except: 
+                final_output += f"\n   ⚠️ 응답 오류"
                 continue
 
             if 'msgHeader' in data and data['msgHeader']['headerCd'] != '0':
@@ -118,22 +113,19 @@ def get_station_arrival(keyword: str) -> str:
                     msg1 = bus.get('arrmsg1', '')
                     adirection = bus.get('adirection', '')
                     
-                    dir_text = ""
-                    if adirection and adirection != "None": dir_text = f"👉 {adirection} 방면"
-                    else: dir_text = get_direction_from_csv(rt_nm, user_ars_id)
+                    dir_text = f"👉 {adirection} 방면" if (adirection and adirection != "None") else get_direction_from_csv(rt_nm, user_ars_id)
 
                     if msg1 != '운행종료' and msg1 != '출발대기':
                         final_output += f"\n   🚌 **{rt_nm}**: {msg1} {dir_text}"
                         count += 1
                 if count == 0: final_output += "\n   (도착 예정 버스 없음)"
             else: final_output += "\n   (도착 정보 없음)"
-        except Exception as e:
-            final_output += f"\n   ⚠️ 에러: {str(e)}"
+        except Exception as e: final_output += f"\n   ⚠️ 에러: {str(e)}"
     return final_output
 
 
 # =================================================================
-# 🛠️ Tool 2: 버스 위치 조회
+# 🛠️ Tool 2: 버스 위치 조회 (직관적 표현 개선)
 # =================================================================
 def get_bus_location(bus_number: str) -> str:
     print(f"[Tool 2] '{bus_number}'번 위치")
@@ -154,73 +146,74 @@ def get_bus_location(bus_number: str) -> str:
         if isinstance(items, dict): items = [items]
         
         output = f"🚍 **[{bus_number}번 버스 위치]**\n"
-        bus_count = 0
+        
+        detected_buses = {} # Key: Position Index, Value: Message
+
         for i, item in enumerate(items):
             msg = item.get('arrmsg1', '')
-            this_st = item.get('stNm', '')
+            this_st = item.get('stNm', '') # 이게 '다음 정류장' (API 기준)
             
-            if '곧 도착' in msg or '[0번째 전]' in msg:
-                next_st = items[i+1].get('stNm') if i+1 < len(items) else "종점"
-                output += f"\n🚌 **{bus_count+1}호차**: **{this_st}** (진입) -> {next_st}\n"
-                bus_count += 1
-            elif '[1번째 전]' in msg:
-                prev_st = items[i-1].get('stNm') if i > 0 else "기점"
-                output += f"\n🚌 **{bus_count+1}호차**: **{prev_st}** -> {this_st} ({msg})\n"
-                bus_count += 1
-        if bus_count == 0: output += "\n운행 중인 차량 없음"
+            # 1. "[1번째 전]" 데이터 (신뢰도 높음) -> 버스는 '이전 정류장'에 있음
+            if '[1번째 전]' in msg:
+                bus_pos_idx = i - 1
+                if bus_pos_idx >= 0:
+                    prev_st = items[i-1].get('stNm') if i > 0 else "기점" # 이게 '현재 위치'
+                    
+                    # [직관적 메시지 변환] "1분46초후[1번째 전]" -> "약 1분 46초 후 도착 예정"
+                    clean_time = msg.split('[')[0].replace("후", "") # "1분46초"
+                    
+                    display_msg = f"📍 **현재 위치:** {prev_st}\n   👉 **다음 정류장:** {this_st} (약 {clean_time} 후 도착 예정)"
+                    detected_buses[bus_pos_idx] = display_msg
+
+            # 2. "곧 도착" 데이터 (진입 중)
+            elif '곧 도착' in msg or '[0번째 전]' in msg:
+                bus_pos_idx = i
+                # 중복 방지: 이미 '1번째 전'으로 등록된 게 없으면 등록
+                if bus_pos_idx not in detected_buses:
+                    next_st = items[i+1].get('stNm') if i+1 < len(items) else "종점" # 이게 '다음 정류장'
+                    
+                    display_msg = f"📍 **현재 위치:** {this_st} (진입 중)\n   👉 **다음 정류장:** {next_st}"
+                    detected_buses[bus_pos_idx] = display_msg
+
+        # 3. 결과 출력
+        sorted_indices = sorted(detected_buses.keys())
+        
+        if not sorted_indices:
+            output += "\n운행 중인 차량 없음"
+        else:
+            for idx in sorted_indices:
+                output += f"\n🚌\n{detected_buses[idx]}\n"
+
         return output
+        
     except Exception as e: return f"❌ 에러: {e}"
 
 
 # -----------------------------------------------------------------
-# 🚀 핸들러 (최신 스펙 2025-03-26 적용)
+# 🚀 핸들러
 # -----------------------------------------------------------------
 TOOLS = [
-    {
-        "name": "get_station_arrival", 
-        "description": "정류장 이름(예: 하림각) 또는 ARS-ID(예: 01136)를 입력하여 버스 도착 정보를 조회합니다.", 
-        "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}, 
-        "func": get_station_arrival
-    },
-    {
-        "name": "get_bus_location", 
-        "description": "버스 번호를 입력받아 현재 버스의 위치를 조회합니다.", 
-        "inputSchema": {"type": "object", "properties": {"bus_number": {"type": "string"}}, "required": ["bus_number"]}, 
-        "func": get_bus_location
-    }
+    {"name": "get_station_arrival", "description": "정류장 이름/번호로 도착 정보 조회", "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}, "func": get_station_arrival},
+    {"name": "get_bus_location", "description": "버스 번호로 현재 위치 조회", "inputSchema": {"type": "object", "properties": {"bus_number": {"type": "string"}}, "required": ["bus_number"]}, "func": get_bus_location}
 ]
 
 async def handle_request(request):
-    if request.method == "GET" or request.method == "HEAD":
-        return JSONResponse({"status": "BusRam V24 Online"})
-    
+    if request.method == "GET" or request.method == "HEAD": return JSONResponse({"status": "BusRam V27 Online"})
     try:
         body = await request.json()
         msg_id = body.get("id")
-        method = body.get("method")
-
-        if method == "initialize": 
+        if body.get("method") == "initialize": 
             return JSONResponse({
-                "jsonrpc": "2.0", 
-                "id": msg_id, 
+                "jsonrpc": "2.0", "id": msg_id, 
                 "result": {
-                    # 🚨 여기가 핵심! 반려 원인 해결
                     "protocolVersion": "2025-03-26", 
-                    "capabilities": {
-                        "tools": {},
-                        "resources": {},
-                        "prompts": {},
-                        "logging": {} 
-                    },
-                    "serverInfo": {
-                        "name": "BusRam", 
-                        "version": "1.2.1"
-                    }
+                    "capabilities": {"tools": {}, "resources": {}, "prompts": {}, "logging": {}},
+                    "serverInfo": {"name": "BusRam", "version": "1.2.4"}
                 }
             })
-        elif method == "tools/list": 
+        elif body.get("method") == "tools/list": 
             return JSONResponse({"jsonrpc": "2.0", "id": msg_id, "result": {"tools": [{k: v for k, v in t.items() if k != 'func'} for t in TOOLS]}})
-        elif method == "tools/call":
+        elif body.get("method") == "tools/call":
             tool = next((t for t in TOOLS if t["name"] == body["params"]["name"]), None)
             if tool:
                 res = await run_in_threadpool(tool["func"], **body["params"]["arguments"])
