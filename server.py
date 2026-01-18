@@ -1,7 +1,7 @@
 # =================================================================
-# BusRam MCP Server (V27: User-Friendly Location Display)
-# - 직관적인 표현으로 변경: "현재 위치", "다음 정류장" 명시
-# - "[1번째 전]" 등 내부 용어 삭제하고 친절한 문구로 대체
+# BusRam MCP Server (V28: Text Only Version)
+# - 모든 이모티콘(🚌, 📍, 👉, 🚏, 🚍) 제거
+# - 텍스트 중심의 깔끔한 출력 (호환성 및 심플함 강조)
 # =================================================================
 import uvicorn
 import requests
@@ -17,10 +17,10 @@ from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.concurrency import run_in_threadpool
 
-# 🔑 [키 설정]
+# [키 설정]
 DECODED_KEY = "ezGwhdiNnVtd+HvkfiKgr/Z4r+gvfeUIRz/dVqEMTaJuAyXxGiv0pzK0P5YT37c4ylzS7kI+/pJFoYr9Ce+TDg=="
 
-print("📂 [System] 데이터 로딩 중...")
+print("[System] 데이터 로딩 중...")
 STATION_CSV = "station_data.csv"
 ROUTE_CSV = "route_data.csv"
 
@@ -63,16 +63,17 @@ def get_direction_from_csv(bus_no, current_ars_id):
     current_seq = current_node.iloc[0]['순번']
     next_node = route_path[route_path['순번'] == current_seq + 1]
     if not next_node.empty:
-        return f"👉 {next_node.iloc[0]['정류소명']}방향"
-    return "🏁 종점행"
+        # [수정] 이모티콘 제거
+        return f"{next_node.iloc[0]['정류소명']} 방향"
+    return "종점행"
 
 
 # =================================================================
-# 🛠️ Tool 1: 정류장 도착 정보
+# Tool 1: 정류장 도착 정보
 # =================================================================
 def get_station_arrival(keyword: str) -> str:
     print(f"[Tool 1] '{keyword}' 검색")
-    if df_stations.empty: return "❌ 데이터 없음"
+    if df_stations.empty: return "데이터 없음"
     
     if keyword.isdigit() and len(keyword) <= 5:
         results = df_stations[df_stations['ars_id'] == keyword.zfill(5)]
@@ -80,16 +81,18 @@ def get_station_arrival(keyword: str) -> str:
         mask = df_stations['정류장명'].str.contains(keyword)
         results = df_stations[mask].head(4)
         
-    if results.empty: return f"❌ '{keyword}' 검색 결과가 없습니다."
+    if results.empty: return f" '{keyword}' 검색 결과가 없습니다."
     
-    final_output = f"🚏 **'{keyword}' 도착 정보**\n"
+    # [수정] 이모티콘 제거
+    final_output = f"**'{keyword}' 도착 정보**\n"
     url = "http://ws.bus.go.kr/api/rest/arrive/getLowArrInfoByStId"
     
     for _, row in results.iterrows():
         st_name = row['정류장명']
         api_st_id = row['api_id']
         user_ars_id = row['ars_id']
-        final_output += f"\n📍 **{st_name}** ({user_ars_id})"
+        # [수정] 이모티콘 제거
+        final_output += f"\n**{st_name}** ({user_ars_id})"
         
         try:
             params = {"serviceKey": DECODED_KEY, "stId": api_st_id, "resultType": "json"}
@@ -97,7 +100,7 @@ def get_station_arrival(keyword: str) -> str:
             
             try: data = response.json()
             except: 
-                final_output += f"\n   ⚠️ 응답 오류"
+                final_output += f"\n   응답 오류"
                 continue
 
             if 'msgHeader' in data and data['msgHeader']['headerCd'] != '0':
@@ -113,25 +116,27 @@ def get_station_arrival(keyword: str) -> str:
                     msg1 = bus.get('arrmsg1', '')
                     adirection = bus.get('adirection', '')
                     
-                    dir_text = f"👉 {adirection} 방면" if (adirection and adirection != "None") else get_direction_from_csv(rt_nm, user_ars_id)
+                    # [수정] 이모티콘 제거
+                    dir_text = f"{adirection} 방면" if (adirection and adirection != "None") else get_direction_from_csv(rt_nm, user_ars_id)
 
                     if msg1 != '운행종료' and msg1 != '출발대기':
-                        final_output += f"\n   🚌 **{rt_nm}**: {msg1} {dir_text}"
+                        # [수정] 이모티콘 제거
+                        final_output += f"\n   - **{rt_nm}**: {msg1} {dir_text}"
                         count += 1
                 if count == 0: final_output += "\n   (도착 예정 버스 없음)"
             else: final_output += "\n   (도착 정보 없음)"
-        except Exception as e: final_output += f"\n   ⚠️ 에러: {str(e)}"
+        except Exception as e: final_output += f"\n   에러: {str(e)}"
     return final_output
 
 
 # =================================================================
-# 🛠️ Tool 2: 버스 위치 조회 (직관적 표현 개선)
+# Tool 2: 버스 위치 조회 (텍스트 전용)
 # =================================================================
 def get_bus_location(bus_number: str) -> str:
     print(f"[Tool 2] '{bus_number}'번 위치")
-    if df_routes.empty: return "❌ 노선 데이터 없음"
+    if df_routes.empty: return "노선 데이터 없음"
     target_row = df_routes[df_routes['노선명'] == bus_number]
-    if target_row.empty: return f"❌ '{bus_number}'번 버스를 찾을 수 없습니다."
+    if target_row.empty: return f"'{bus_number}'번 버스를 찾을 수 없습니다."
     
     route_id = target_row.iloc[0]['ROUTE_ID']
     url = "http://ws.bus.go.kr/api/rest/arrive/getArrInfoByRouteAll"
@@ -141,56 +146,53 @@ def get_bus_location(bus_number: str) -> str:
         response = requests.get(url, params=params, timeout=5)
         data = response.json()
         
-        if 'msgBody' not in data: return "⚠️ 데이터 없음"
+        if 'msgBody' not in data: return "데이터 없음"
         items = data['msgBody']['itemList']
         if isinstance(items, dict): items = [items]
         
-        output = f"🚍 **[{bus_number}번 버스 위치]**\n"
+        # [수정] 이모티콘 제거
+        output = f"**[{bus_number}번 버스 위치]**\n"
         
-        detected_buses = {} # Key: Position Index, Value: Message
+        detected_buses = {}
 
         for i, item in enumerate(items):
             msg = item.get('arrmsg1', '')
-            this_st = item.get('stNm', '') # 이게 '다음 정류장' (API 기준)
+            this_st = item.get('stNm', '') 
             
-            # 1. "[1번째 전]" 데이터 (신뢰도 높음) -> 버스는 '이전 정류장'에 있음
             if '[1번째 전]' in msg:
                 bus_pos_idx = i - 1
                 if bus_pos_idx >= 0:
-                    prev_st = items[i-1].get('stNm') if i > 0 else "기점" # 이게 '현재 위치'
+                    prev_st = items[i-1].get('stNm') if i > 0 else "기점"
+                    clean_time = msg.split('[')[0].replace("후", "")
                     
-                    # [직관적 메시지 변환] "1분46초후[1번째 전]" -> "약 1분 46초 후 도착 예정"
-                    clean_time = msg.split('[')[0].replace("후", "") # "1분46초"
-                    
-                    display_msg = f"📍 **현재 위치:** {prev_st}\n   👉 **다음 정류장:** {this_st} (약 {clean_time} 후 도착 예정)"
+                    # [수정] 이모티콘 제거 및 텍스트 정리
+                    display_msg = f"**현재 위치:** {prev_st}\n   **다음 정류장:** {this_st} (약 {clean_time} 후 도착 예정)"
                     detected_buses[bus_pos_idx] = display_msg
 
-            # 2. "곧 도착" 데이터 (진입 중)
             elif '곧 도착' in msg or '[0번째 전]' in msg:
                 bus_pos_idx = i
-                # 중복 방지: 이미 '1번째 전'으로 등록된 게 없으면 등록
                 if bus_pos_idx not in detected_buses:
-                    next_st = items[i+1].get('stNm') if i+1 < len(items) else "종점" # 이게 '다음 정류장'
+                    next_st = items[i+1].get('stNm') if i+1 < len(items) else "종점"
                     
-                    display_msg = f"📍 **현재 위치:** {this_st} (진입 중)\n   👉 **다음 정류장:** {next_st}"
+                    # [수정] 이모티콘 제거 및 텍스트 정리
+                    display_msg = f"**현재 위치:** {this_st} (진입 중)\n   **다음 정류장:** {next_st}"
                     detected_buses[bus_pos_idx] = display_msg
 
-        # 3. 결과 출력
         sorted_indices = sorted(detected_buses.keys())
         
         if not sorted_indices:
             output += "\n운행 중인 차량 없음"
         else:
             for idx in sorted_indices:
-                output += f"\n🚌\n{detected_buses[idx]}\n"
+                output += f"\n[차량]\n{detected_buses[idx]}\n"
 
         return output
         
-    except Exception as e: return f"❌ 에러: {e}"
+    except Exception as e: return f" 에러: {e}"
 
 
 # -----------------------------------------------------------------
-# 🚀 핸들러
+# 핸들러
 # -----------------------------------------------------------------
 TOOLS = [
     {"name": "get_station_arrival", "description": "정류장 이름/번호로 도착 정보 조회", "inputSchema": {"type": "object", "properties": {"keyword": {"type": "string"}}, "required": ["keyword"]}, "func": get_station_arrival},
@@ -198,7 +200,7 @@ TOOLS = [
 ]
 
 async def handle_request(request):
-    if request.method == "GET" or request.method == "HEAD": return JSONResponse({"status": "BusRam V27 Online"})
+    if request.method == "GET" or request.method == "HEAD": return JSONResponse({"status": "BusRam V28 TextOnly Online"})
     try:
         body = await request.json()
         msg_id = body.get("id")
@@ -208,7 +210,7 @@ async def handle_request(request):
                 "result": {
                     "protocolVersion": "2025-03-26", 
                     "capabilities": {"tools": {}, "resources": {}, "prompts": {}, "logging": {}},
-                    "serverInfo": {"name": "BusRam", "version": "1.2.4"}
+                    "serverInfo": {"name": "BusRam", "version": "1.2.5"}
                 }
             })
         elif body.get("method") == "tools/list": 
