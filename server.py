@@ -1,8 +1,7 @@
 # =================================================================
-# BusRam MCP Server (V26: "1st Stop Before" Priority)
-# 1. "1번째 전" (시간 정보 포함) 데이터를 최우선으로 신뢰
-# 2. 불확실한 "곧 도착/진입"은 중복 시 제거
-# 3. "N호차" 숫자 삭제 -> 이모지로 깔끔하게
+# BusRam MCP Server (V27: User-Friendly Location Display)
+# - 직관적인 표현으로 변경: "현재 위치", "다음 정류장" 명시
+# - "[1번째 전]" 등 내부 용어 삭제하고 친절한 문구로 대체
 # =================================================================
 import uvicorn
 import requests
@@ -38,7 +37,6 @@ try:
     except: df_stations = pd.read_csv(STATION_CSV, encoding='utf-8')
     df_stations['정류장명'] = df_stations['정류장명'].astype(str)
     
-    # API용 9자리 ID
     if '정류소ID' in df_stations.columns:
         df_stations['api_id'] = df_stations['정류소ID'].astype(str)
     elif 'NODE_ID' in df_stations.columns:
@@ -46,7 +44,6 @@ try:
     else:
         df_stations['api_id'] = df_stations['정류장번호'].astype(str).apply(lambda x: re.sub(r'[^0-9]', '', x))
 
-    # 사용자용 5자리 ARS ID
     if '모바일단축번호' in df_stations.columns:
         df_stations['ars_id'] = df_stations['모바일단축번호'].fillna(0).astype(str).apply(lambda x: x.split('.')[0].zfill(5))
     else:
@@ -128,7 +125,7 @@ def get_station_arrival(keyword: str) -> str:
 
 
 # =================================================================
-# 🛠️ Tool 2: 버스 위치 조회 (사용자 피드백 반영: 1번째 전 우선)
+# 🛠️ Tool 2: 버스 위치 조회 (직관적 표현 개선)
 # =================================================================
 def get_bus_location(bus_number: str) -> str:
     print(f"[Tool 2] '{bus_number}'번 위치")
@@ -150,44 +147,42 @@ def get_bus_location(bus_number: str) -> str:
         
         output = f"🚍 **[{bus_number}번 버스 위치]**\n"
         
-        # 🚨 [신뢰도 기반 필터링]
-        # detected_buses: (위치 인덱스) -> (메시지) 딕셔너리
-        # '1번째 전' 데이터가 들어오면, 같은 위치의 '곧 도착' 데이터를 덮어씀 (신뢰도 높음)
-        
-        detected_buses = {} # Key: Bus Position Index, Value: Message String
+        detected_buses = {} # Key: Position Index, Value: Message
 
         for i, item in enumerate(items):
             msg = item.get('arrmsg1', '')
-            this_st = item.get('stNm', '')
+            this_st = item.get('stNm', '') # 이게 '다음 정류장' (API 기준)
             
-            # 1. 신뢰도 1순위: "[1번째 전]" (사용자 인증 정확한 데이터)
+            # 1. "[1번째 전]" 데이터 (신뢰도 높음) -> 버스는 '이전 정류장'에 있음
             if '[1번째 전]' in msg:
-                # 버스는 '이전 정류장(i-1)'에 있음
                 bus_pos_idx = i - 1
                 if bus_pos_idx >= 0:
-                    prev_st = items[i-1].get('stNm') if i > 0 else "기점"
-                    # 메시지 예: "인왕빌딩 -> 구기터널입구 (1분 11초 후 [1번째 전])"
-                    display_msg = f"📍 현재: **{prev_st}** -> {this_st} ({msg})"
+                    prev_st = items[i-1].get('stNm') if i > 0 else "기점" # 이게 '현재 위치'
+                    
+                    # [직관적 메시지 변환] "1분46초후[1번째 전]" -> "약 1분 46초 후 도착 예정"
+                    clean_time = msg.split('[')[0].replace("후", "") # "1분46초"
+                    
+                    display_msg = f"📍 **현재 위치:** {prev_st}\n   👉 **다음 정류장:** {this_st} (약 {clean_time} 후 도착 예정)"
                     detected_buses[bus_pos_idx] = display_msg
 
-            # 2. 신뢰도 2순위: "곧 도착" (불확실, 유령일 수 있음)
+            # 2. "곧 도착" 데이터 (진입 중)
             elif '곧 도착' in msg or '[0번째 전]' in msg:
                 bus_pos_idx = i
-                # 이미 이 위치에 '1번째 전'으로 등록된 진짜 버스가 있다면? -> '곧 도착'은 무시 (덮어쓰지 않음)
+                # 중복 방지: 이미 '1번째 전'으로 등록된 게 없으면 등록
                 if bus_pos_idx not in detected_buses:
-                    next_st = items[i+1].get('stNm') if i+1 < len(items) else "종점"
-                    display_msg = f"📍 현재: **{this_st}** (진입) -> {next_st}"
+                    next_st = items[i+1].get('stNm') if i+1 < len(items) else "종점" # 이게 '다음 정류장'
+                    
+                    display_msg = f"📍 **현재 위치:** {this_st} (진입 중)\n   👉 **다음 정류장:** {next_st}"
                     detected_buses[bus_pos_idx] = display_msg
 
-        # 3. 결과 출력 (인덱스 순서대로 정렬)
+        # 3. 결과 출력
         sorted_indices = sorted(detected_buses.keys())
         
         if not sorted_indices:
             output += "\n운행 중인 차량 없음"
         else:
             for idx in sorted_indices:
-                # 호차 번호 삭제 요청 반영
-                output += f"\n🚌 {detected_buses[idx]}\n"
+                output += f"\n🚌\n{detected_buses[idx]}\n"
 
         return output
         
@@ -203,7 +198,7 @@ TOOLS = [
 ]
 
 async def handle_request(request):
-    if request.method == "GET" or request.method == "HEAD": return JSONResponse({"status": "BusRam V26 Online"})
+    if request.method == "GET" or request.method == "HEAD": return JSONResponse({"status": "BusRam V27 Online"})
     try:
         body = await request.json()
         msg_id = body.get("id")
@@ -213,7 +208,7 @@ async def handle_request(request):
                 "result": {
                     "protocolVersion": "2025-03-26", 
                     "capabilities": {"tools": {}, "resources": {}, "prompts": {}, "logging": {}},
-                    "serverInfo": {"name": "BusRam", "version": "1.2.3"}
+                    "serverInfo": {"name": "BusRam", "version": "1.2.4"}
                 }
             })
         elif body.get("method") == "tools/list": 
